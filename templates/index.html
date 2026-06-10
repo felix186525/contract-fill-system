@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>合同批量填写系统</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fa;color:#333}
+.header{background:#1a73e8;color:#fff;padding:14px 24px;display:flex;align-items:center;gap:12px}
+.header h1{font-size:18px;font-weight:600}
+.container{max-width:900px;margin:20px auto;padding:0 16px}
+.tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid #e0e0e0}
+.tab{padding:10px 24px;cursor:pointer;font-size:14px;font-weight:500;color:#666;border-bottom:3px solid transparent;margin-bottom:-2px;transition:all .15s}
+.tab.active{color:#1a73e8;border-bottom-color:#1a73e8}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.card{background:#fff;border-radius:0 8px 8px 8px;padding:24px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.card h2{font-size:15px;font-weight:600;margin-bottom:16px;color:#1a73e8;border-left:3px solid #1a73e8;padding-left:10px}
+.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.form-item label{display:block;font-size:12px;color:#666;margin-bottom:4px}
+.form-item input{width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;transition:border-color .15s}
+.form-item input:focus{outline:none;border-color:#1a73e8}
+.upload-area{border:2px dashed #ccc;border-radius:6px;padding:24px;text-align:center;cursor:pointer;transition:all .2s}
+.upload-area:hover,.upload-area.drag{border-color:#1a73e8;background:#f0f6ff}
+.upload-area input{display:none}
+.file-info{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f0f6ff;border-radius:4px;margin-top:8px;font-size:13px}
+.file-info .remove{cursor:pointer;color:#e53e3e;margin-left:auto;font-size:16px;line-height:1}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 20px;border:none;border-radius:6px;cursor:pointer;font-size:14px;font-weight:500;transition:background .2s}
+.btn-primary{background:#1a73e8;color:#fff}
+.btn-primary:hover{background:#1557b0}
+.btn-primary:disabled{background:#aaa;cursor:not-allowed}
+.mapping-table{width:100%;border-collapse:collapse;font-size:13px}
+.mapping-table th{background:#f5f7fa;padding:8px 10px;text-align:left;border:1px solid #e0e0e0}
+.mapping-table td{padding:6px 10px;border:1px solid #e0e0e0}
+.mapping-table select{width:100%;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:12px}
+.progress-wrap{display:none;margin-top:14px}
+.progress-bar{height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:#1a73e8;width:0;transition:width .3s;border-radius:3px}
+.status-msg{font-size:13px;color:#555;margin-top:6px}
+.error-box{background:#fff5f5;border:1px solid #fed7d7;border-radius:4px;padding:10px 12px;margin-top:10px;font-size:13px;color:#c53030}
+.success-box{background:#f0fff4;border:1px solid #9ae6b4;border-radius:4px;padding:14px;margin-top:10px;font-size:14px;color:#276749}
+.success-box a{color:#1a73e8;font-weight:600}
+.tip{font-size:12px;color:#888;margin-top:6px}
+.sep{margin:16px 0;border:none;border-top:1px solid #eee}
+</style>
+</head>
+<body>
+<div class="header">
+  <div>📄</div>
+  <h1>合同批量填写系统</h1>
+</div>
+<div class="container">
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('manual')">手动输入</div>
+    <div class="tab" onclick="switchTab('excel')">Excel批量</div>
+  </div>
+
+  <!-- ===== 手动输入 ===== -->
+  <div id="tab-manual" class="tab-panel active">
+    <div class="card">
+      <h2>上传Word模板</h2>
+      <div class="upload-area" id="mTmplArea" onclick="document.getElementById('mTmplInput').click()">
+        <div style="font-size:28px;margin-bottom:6px">📄</div>
+        <div style="font-size:13px">点击选择 .doc / .docx 模板</div>
+        <input type="file" id="mTmplInput" accept=".doc,.docx" onchange="handleMTmpl(this)">
+      </div>
+      <div id="mTmplInfo" style="display:none" class="file-info">
+        <span>📄</span><span id="mTmplName"></span>
+        <span class="remove" onclick="clearMTmpl()">✕</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>填写合同字段</h2>
+      <div class="form-grid" id="manualForm">
+        {% for f in fields %}
+        <div class="form-item">
+          <label>{{ f.label }}</label>
+          {% if f.get('type') == 'date' %}
+          <input type="date" id="mf_{{ f.key }}" autocomplete="off">
+          {% else %}
+          <input type="text" id="mf_{{ f.key }}" placeholder="{{ f.example }}" autocomplete="off">
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <hr class="sep">
+      <button class="btn btn-primary" id="mGenBtn" onclick="generateManual()" disabled>⚡ 生成合同图片</button>
+      <div class="progress-wrap" id="mProgress">
+        <div class="progress-bar"><div class="progress-fill" id="mProgressFill"></div></div>
+        <div class="status-msg" id="mStatus">生成中，请稍候...</div>
+      </div>
+      <div id="mResult"></div>
+    </div>
+  </div>
+
+  <!-- ===== Excel批量 ===== -->
+  <div id="tab-excel" class="tab-panel">
+    <div class="card">
+      <h2>① 上传Word模板</h2>
+      <div class="upload-area" id="eTmplArea" onclick="document.getElementById('eTmplInput').click()">
+        <div style="font-size:28px;margin-bottom:6px">📄</div>
+        <div style="font-size:13px">点击选择 .doc / .docx 模板</div>
+        <input type="file" id="eTmplInput" accept=".doc,.docx" onchange="handleETmpl(this)">
+      </div>
+      <div id="eTmplInfo" style="display:none" class="file-info">
+        <span>📄</span><span id="eTmplName"></span>
+        <span class="remove" onclick="clearETmpl()">✕</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>② 上传Excel数据</h2>
+      <p class="tip" style="margin-bottom:10px">第一行为列标题，每行一份合同。</p>
+      <div class="upload-area" id="eExcelArea" onclick="document.getElementById('eExcelInput').click()">
+        <div style="font-size:28px;margin-bottom:6px">📊</div>
+        <div style="font-size:13px">点击选择 .xlsx / .xls</div>
+        <input type="file" id="eExcelInput" accept=".xlsx,.xls" onchange="handleExcel(this)">
+      </div>
+      <div id="eExcelInfo" style="display:none" class="file-info">
+        <span>📊</span><span id="eExcelName"></span>
+        <span id="eExcelTotal" style="margin-left:8px;font-size:12px;background:#e8f0fe;color:#1a73e8;padding:2px 8px;border-radius:10px"></span>
+        <span class="remove" onclick="clearExcel()">✕</span>
+      </div>
+      <div id="ePreview" style="display:none;margin-top:12px;overflow-x:auto"></div>
+    </div>
+
+    <div class="card" id="eMappingCard" style="display:none">
+      <h2>③ 字段映射</h2>
+      <table class="mapping-table">
+        <thead><tr><th>合同字段</th><th>对应Excel列</th></tr></thead>
+        <tbody id="eMappingBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>④ 批量生成</h2>
+      <button class="btn btn-primary" id="eGenBtn" onclick="generateExcel()" disabled>⚡ 开始批量生成</button>
+      <div class="progress-wrap" id="eProgress">
+        <div class="progress-bar"><div class="progress-fill" id="eProgressFill"></div></div>
+        <div class="status-msg" id="eStatus">生成中...</div>
+      </div>
+      <div id="eResult"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const FIELDS = {{ fields | tojson }};
+let mTmplFile = null;
+let eTmplFile = null, eExcelFile = null, eHeaders = [];
+
+// ---- Tab切换 ----
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['manual','excel'][i] === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ---- 手动输入 ----
+function handleMTmpl(input) {
+  if (!input.files[0]) return;
+  mTmplFile = input.files[0];
+  document.getElementById('mTmplName').textContent = mTmplFile.name;
+  document.getElementById('mTmplInfo').style.display = 'flex';
+  document.getElementById('mTmplArea').style.display = 'none';
+  document.getElementById('mGenBtn').disabled = false;
+}
+function clearMTmpl() {
+  mTmplFile = null;
+  document.getElementById('mTmplInput').value = '';
+  document.getElementById('mTmplInfo').style.display = 'none';
+  document.getElementById('mTmplArea').style.display = 'block';
+  document.getElementById('mGenBtn').disabled = true;
+}
+
+function generateManual() {
+  if (!mTmplFile) { alert('请先上传模板'); return; }
+  const data = {};
+  FIELDS.forEach(f => {
+    const v = document.getElementById('mf_' + f.key).value.trim();
+    if (v) data[f.key] = v;
+  });
+
+  const btn = document.getElementById('mGenBtn');
+  btn.disabled = true;
+  document.getElementById('mProgress').style.display = 'block';
+  document.getElementById('mProgressFill').style.width = '40%';
+  document.getElementById('mStatus').textContent = '生成中，请稍候...';
+  document.getElementById('mResult').innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('template', mTmplFile);
+  fd.append('data', JSON.stringify(data));
+
+  fetch('/api/generate-manual', { method: 'POST', body: fd })
+    .then(resp => {
+      if (!resp.ok) return resp.json().then(d => Promise.reject(d.error || '生成失败'));
+      document.getElementById('mProgressFill').style.width = '100%';
+      document.getElementById('mStatus').textContent = '完成！正在下载...';
+      return resp.blob();
+    })
+    .then(blob => {
+      btn.disabled = false;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = '合同.png'; a.click();
+      URL.revokeObjectURL(url);
+      document.getElementById('mResult').innerHTML = '<div class="success-box">✅ 合同图片已下载</div>';
+    })
+    .catch(err => {
+      btn.disabled = false;
+      document.getElementById('mStatus').textContent = '失败';
+      document.getElementById('mResult').innerHTML = '<div class="error-box">❌ ' + err + '</div>';
+    });
+}
+
+// ---- Excel批量 ----
+function handleETmpl(input) {
+  if (!input.files[0]) return;
+  eTmplFile = input.files[0];
+  document.getElementById('eTmplName').textContent = eTmplFile.name;
+  document.getElementById('eTmplInfo').style.display = 'flex';
+  document.getElementById('eTmplArea').style.display = 'none';
+  checkEReady();
+}
+function clearETmpl() {
+  eTmplFile = null;
+  document.getElementById('eTmplInput').value = '';
+  document.getElementById('eTmplInfo').style.display = 'none';
+  document.getElementById('eTmplArea').style.display = 'block';
+  checkEReady();
+}
+
+function handleExcel(input) {
+  if (!input.files[0]) return;
+  eExcelFile = input.files[0];
+  document.getElementById('eExcelName').textContent = eExcelFile.name;
+  document.getElementById('eExcelInfo').style.display = 'flex';
+  document.getElementById('eExcelArea').style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('excel', eExcelFile);
+  fetch('/api/parse-excel', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { alert(d.error); clearExcel(); return; }
+      eHeaders = d.headers;
+      document.getElementById('eExcelTotal').textContent = '共' + d.total + '行';
+
+      let html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+      eHeaders.forEach(h => html += '<th style="padding:5px 8px;border:1px solid #e0e0e0;background:#f5f7fa;white-space:nowrap">' + (h||'') + '</th>');
+      html += '</tr></thead><tbody>';
+      d.preview.forEach(row => {
+        html += '<tr>';
+        eHeaders.forEach(h => html += '<td style="padding:5px 8px;border:1px solid #e0e0e0;white-space:nowrap">' + (row[h]||'') + '</td>');
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      const pw = document.getElementById('ePreview');
+      pw.innerHTML = html; pw.style.display = 'block';
+
+      buildMapping();
+      checkEReady();
+    })
+    .catch(() => alert('解析Excel失败'));
+}
+function clearExcel() {
+  eExcelFile = null; eHeaders = [];
+  document.getElementById('eExcelInput').value = '';
+  document.getElementById('eExcelInfo').style.display = 'none';
+  document.getElementById('eExcelArea').style.display = 'block';
+  document.getElementById('ePreview').style.display = 'none';
+  document.getElementById('eMappingCard').style.display = 'none';
+  checkEReady();
+}
+
+function buildMapping() {
+  const tbody = document.getElementById('eMappingBody');
+  tbody.innerHTML = '';
+  FIELDS.forEach(f => {
+    const opts = ['<option value="">-- 不映射 --</option>'];
+    eHeaders.forEach(h => {
+      const sel = (h === f.label || h === f.key) ? ' selected' : '';
+      opts.push('<option value="' + h + '"' + sel + '>' + h + '</option>');
+    });
+    tbody.innerHTML += '<tr><td style="font-size:13px">' + f.label + '</td><td><select id="map_' + f.key + '">' + opts.join('') + '</select></td></tr>';
+  });
+  document.getElementById('eMappingCard').style.display = 'block';
+}
+
+function getMapping() {
+  const m = {};
+  FIELDS.forEach(f => {
+    const el = document.getElementById('map_' + f.key);
+    if (el && el.value) m[f.key] = el.value;
+  });
+  return m;
+}
+
+function checkEReady() {
+  document.getElementById('eGenBtn').disabled = !(eTmplFile && eExcelFile && eHeaders.length);
+}
+
+function generateExcel() {
+  const mapping = getMapping();
+  if (!Object.keys(mapping).length) { alert('请至少映射一个字段'); return; }
+
+  const btn = document.getElementById('eGenBtn');
+  btn.disabled = true;
+  document.getElementById('eProgress').style.display = 'block';
+  document.getElementById('eProgressFill').style.width = '30%';
+  document.getElementById('eStatus').textContent = '生成中，请稍候...';
+  document.getElementById('eResult').innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('template', eTmplFile);
+  fd.append('excel', eExcelFile);
+  fd.append('mapping', JSON.stringify(mapping));
+
+  fetch('/api/generate', { method: 'POST', body: fd })
+    .then(resp => {
+      document.getElementById('eProgressFill').style.width = '100%';
+      btn.disabled = false;
+      // 单条：直接下载图片
+      const ct = resp.headers.get('content-type') || '';
+      if (ct.includes('image/png')) {
+        document.getElementById('eStatus').textContent = '完成！正在下载...';
+        return resp.blob().then(blob => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = '合同.png'; a.click();
+          URL.revokeObjectURL(url);
+          document.getElementById('eResult').innerHTML = '<div class="success-box">✅ 合同图片已下载</div>';
+        });
+      }
+      return resp.json().then(d => {
+        if (d.error) {
+          document.getElementById('eStatus').textContent = '失败';
+          document.getElementById('eResult').innerHTML = '<div class="error-box">❌ ' + d.error + '</div>';
+          return;
+        }
+        document.getElementById('eStatus').textContent = '完成！共生成 ' + d.generated + ' 份';
+        let html = '<div class="success-box">✅ 成功生成 <strong>' + d.generated + '</strong> 份合同图片 <a href="' + d.download_url + '">⬇ 下载ZIP</a></div>';
+        if (d.errors && d.errors.length) {
+          html += '<div class="error-box" style="margin-top:8px">部分失败：<br>' + d.errors.join('<br>') + '</div>';
+        }
+        document.getElementById('eResult').innerHTML = html;
+      });
+    })
+    .catch(err => {
+      btn.disabled = false;
+      document.getElementById('eStatus').textContent = '请求失败';
+      document.getElementById('eResult').innerHTML = '<div class="error-box">❌ ' + err + '</div>';
+    });
+}
+
+// 拖拽
+['mTmplArea','eTmplArea','eExcelArea'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('drag'); });
+  el.addEventListener('dragleave', () => el.classList.remove('drag'));
+  el.addEventListener('drop', e => {
+    e.preventDefault(); el.classList.remove('drag');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (id === 'mTmplArea') { document.getElementById('mTmplInput').files = e.dataTransfer.files; handleMTmpl(document.getElementById('mTmplInput')); }
+    else if (id === 'eTmplArea') { document.getElementById('eTmplInput').files = e.dataTransfer.files; handleETmpl(document.getElementById('eTmplInput')); }
+    else { document.getElementById('eExcelInput').files = e.dataTransfer.files; handleExcel(document.getElementById('eExcelInput')); }
+  });
+});
+</script>
+</body>
+</html>
