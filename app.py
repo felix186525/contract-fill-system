@@ -211,6 +211,58 @@ def rank_plate_match(query, plate, plate_tail):
     return None
 
 
+def first_vehicle_match(query):
+    matches = []
+    for record in load_records('vehicle'):
+        rank = rank_plate_match(query, record.get('plate', ''), record.get('plate_tail', ''))
+        if rank is not None:
+            matches.append((rank, record.get('plate', ''), record))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return matches[0][2]
+
+
+def first_driver_match(query):
+    matches = []
+    for record in load_records('driver'):
+        rank = rank_match(query, record.get('name', ''))
+        if rank is not None:
+            matches.append((rank, record.get('name', ''), record))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return matches[0][2]
+
+
+def fill_if_blank(data, key, value):
+    if not compact_text(data.get(key)) and compact_text(value):
+        data[key] = compact_text(value)
+
+
+def enrich_fill_data(data):
+    plate = compact_text(data.get('plate'))
+    if plate:
+        vehicle = first_vehicle_match(plate)
+        if vehicle:
+            data['plate'] = vehicle.get('plate_tail') or normalize_plate(vehicle.get('plate', ''))
+            fill_if_blank(data, 'seat_count', vehicle.get('seat_count'))
+            fill_if_blank(data, 'car_type', vehicle.get('car_type'))
+            fill_if_blank(data, 'transport_cert', vehicle.get('transport_cert'))
+
+    for index in (1, 2):
+        name_key = 'driver%d_name' % index
+        name = compact_text(data.get(name_key))
+        if not name:
+            continue
+        driver = first_driver_match(name)
+        if driver:
+            data[name_key] = driver.get('name') or name
+            fill_if_blank(data, 'driver%d_phone' % index, driver.get('phone'))
+            fill_if_blank(data, 'driver%d_cert' % index, driver.get('cert'))
+    return data
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -542,18 +594,80 @@ def split_date(data, date_key, year_key, month_key, day_key):
             data[month_key] = parts[1].lstrip('0') or parts[1]
             data[day_key]   = parts[2].lstrip('0') or parts[2]
             return
+    if not val and (data.get(year_key) or data.get(month_key) or data.get(day_key)):
+        return
     # 没填或格式不对，留空
     data[year_key] = data[month_key] = data[day_key] = ''
 
 
 def build_fill_data(source_data):
-    """处理填充数据：拆分日期、归一化车牌"""
+    """处理填充数据：按车牌/司机姓名补全资料、拆分日期、归一化车牌"""
     data = dict(source_data)
+    data = enrich_fill_data(data)
     data['plate'] = normalize_plate(data.get('plate', ''))
     split_date(data, 'start_date', 'start_year', 'start_month', 'start_day')
     split_date(data, 'end_date',   'end_year',   'end_month',   'end_day')
     split_date(data, 'sign_date',  'sign_year',  'sign_month',  'sign_day')
     return data
+
+
+def prepare_template_file(tmpl_file, task_id):
+    tmpl_ext = tmpl_file.filename.rsplit('.', 1)[1].lower() if '.' in tmpl_file.filename else 'docx'
+    tmpl_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_template.' + tmpl_ext)
+    tmpl_file.save(tmpl_path)
+
+    if tmpl_ext == 'doc':
+        code, out, err = run_cmd(
+            ['libreoffice', '--headless', '--convert-to', 'docx',
+             '--outdir', app.config['UPLOAD_FOLDER'], tmpl_path]
+        )
+        tmpl_docx = tmpl_path.replace('.doc', '.docx')
+        if not os.path.exists(tmpl_docx):
+            raise RuntimeError('doc转docx失败: ' + err)
+        tmpl_path = tmpl_docx
+    return tmpl_path
+
+
+def generate_contract_images(tmpl_path, rows, task_id):
+    task_dir = os.path.join(app.config['OUTPUT_FOLDER'], task_id)
+    os.makedirs(task_dir)
+
+    if len(rows) == 1:
+        row_dir = os.path.join(task_dir, 'row_1')
+        os.makedirs(row_dir)
+        filled_docx = os.path.join(row_dir, 'contract.docx')
+        fill_doc_template(tmpl_path, build_fill_data(rows[0]), filled_docx)
+        return {
+            'single_image': docx_to_single_image(filled_docx, row_dir, 'contract')
+        }
+
+    zip_path = os.path.join(app.config['OUTPUT_FOLDER'], task_id + '.zip')
+    errors = []
+    generated = 0
+
+    with zipfile.ZipFile(zip_path, 'w') as zf:
+        for idx, row in enumerate(rows):
+            row_dir = os.path.join(task_dir, 'row_%d' % (idx + 1))
+            os.makedirs(row_dir)
+            try:
+                filled_docx = os.path.join(row_dir, 'contract.docx')
+                fill_doc_template(tmpl_path, build_fill_data(row), filled_docx)
+                img_path = docx_to_single_image(filled_docx, row_dir, 'contract')
+                zf.write(img_path, '合同_%d.png' % (idx + 1))
+                generated += 1
+            except Exception as e:
+                errors.append('第%d行: %s' % (idx + 1, str(e)))
+                logger.error('Row %d failed: %s', idx + 1, e)
+
+    if generated == 0:
+        raise RuntimeError(json.dumps({'error': '所有记录生成失败', 'details': errors}, ensure_ascii=False))
+
+    return {
+        'task_id': task_id,
+        'generated': generated,
+        'errors': errors,
+        'download_url': '/api/download/' + task_id
+    }
 
 
 @app.route('/')
@@ -669,36 +783,67 @@ def generate_manual():
         return jsonify({'error': '请提供字段数据'}), 400
 
     try:
-        fill_data = build_fill_data(json.loads(raw_data))
+        fill_data = json.loads(raw_data)
     except Exception as e:
         return jsonify({'error': '数据格式错误: ' + str(e)}), 400
 
     task_id = str(uuid.uuid4())[:8]
-    task_dir = os.path.join(app.config['OUTPUT_FOLDER'], task_id)
-    os.makedirs(task_dir)
-
-    tmpl_ext = tmpl_file.filename.rsplit('.', 1)[1].lower() if '.' in tmpl_file.filename else 'docx'
-    tmpl_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_template.' + tmpl_ext)
-    tmpl_file.save(tmpl_path)
-
-    if tmpl_ext == 'doc':
-        code, out, err = run_cmd(
-            ['libreoffice', '--headless', '--convert-to', 'docx',
-             '--outdir', app.config['UPLOAD_FOLDER'], tmpl_path]
-        )
-        tmpl_docx = tmpl_path.replace('.doc', '.docx')
-        if not os.path.exists(tmpl_docx):
-            return jsonify({'error': 'doc转docx失败: ' + err}), 500
-        tmpl_path = tmpl_docx
-
     try:
-        filled_docx = os.path.join(task_dir, 'contract.docx')
-        fill_doc_template(tmpl_path, fill_data, filled_docx)
-        img_path = docx_to_single_image(filled_docx, task_dir, 'contract')
-        return send_file(img_path, mimetype='image/png',
+        tmpl_path = prepare_template_file(tmpl_file, task_id)
+        result = generate_contract_images(tmpl_path, [fill_data], task_id)
+        return send_file(result['single_image'], mimetype='image/png',
                          as_attachment=True, download_name='合同.png')
     except Exception as e:
         logger.error('generate_manual failed: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/generate-rows', methods=['POST'])
+def generate_rows():
+    """前端手动批量行生成，支持只填车牌和司机姓名后自动补全。"""
+    if 'template' not in request.files:
+        return jsonify({'error': '请上传Word模板'}), 400
+
+    raw_rows = request.form.get('rows')
+    if not raw_rows:
+        return jsonify({'error': '请提供批量数据'}), 400
+
+    try:
+        rows = json.loads(raw_rows)
+    except Exception as e:
+        return jsonify({'error': '批量数据格式错误: ' + str(e)}), 400
+
+    if not isinstance(rows, list):
+        return jsonify({'error': '批量数据必须是数组'}), 400
+
+    clean_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        clean = {k: compact_text(v) for k, v in row.items() if compact_text(v)}
+        if clean:
+            clean_rows.append(clean)
+
+    if not clean_rows:
+        return jsonify({'error': '请至少填写一行数据'}), 400
+
+    task_id = str(uuid.uuid4())[:8]
+    try:
+        tmpl_path = prepare_template_file(request.files['template'], task_id)
+        result = generate_contract_images(tmpl_path, clean_rows, task_id)
+        if result.get('single_image'):
+            return send_file(result['single_image'], mimetype='image/png',
+                             as_attachment=True, download_name='合同.png')
+        return jsonify(result)
+    except RuntimeError as e:
+        msg = str(e)
+        try:
+            parsed = json.loads(msg)
+            return jsonify(parsed), 500
+        except Exception:
+            return jsonify({'error': msg}), 500
+    except Exception as e:
+        logger.error('generate_rows failed: %s', e)
         return jsonify({'error': str(e)}), 500
 
 
@@ -716,28 +861,12 @@ def generate():
     mapping = json.loads(mapping_raw)
 
     task_id = str(uuid.uuid4())[:8]
-    task_dir = os.path.join(app.config['OUTPUT_FOLDER'], task_id)
-    os.makedirs(task_dir)
-
-    tmpl_ext = tmpl_file.filename.rsplit('.', 1)[1].lower()
-    tmpl_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_template.' + tmpl_ext)
-    tmpl_file.save(tmpl_path)
-
     excel_ext = excel_file.filename.rsplit('.', 1)[-1].lower() if '.' in excel_file.filename else 'xlsx'
     excel_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_data.' + excel_ext)
     excel_file.save(excel_path)
 
-    if tmpl_ext == 'doc':
-        code, out, err = run_cmd(
-            ['libreoffice', '--headless', '--convert-to', 'docx',
-             '--outdir', app.config['UPLOAD_FOLDER'], tmpl_path]
-        )
-        tmpl_docx = tmpl_path.replace('.doc', '.docx')
-        if not os.path.exists(tmpl_docx):
-            return jsonify({'error': 'doc转docx失败: ' + err}), 500
-        tmpl_path = tmpl_docx
-
     try:
+        tmpl_path = prepare_template_file(tmpl_file, task_id)
         headers, records = read_excel(excel_path)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -745,51 +874,22 @@ def generate():
     if not records:
         return jsonify({'error': 'Excel无数据行'}), 400
 
-    # 单条直接返回图片，多条打ZIP
-    if len(records) == 1:
-        record = records[0]
-        raw = {field_key: record.get(col_name, '') for field_key, col_name in mapping.items()}
-        fill_data = build_fill_data(raw)
-        row_dir = os.path.join(task_dir, 'row_1')
-        os.makedirs(row_dir)
-        try:
-            filled_docx = os.path.join(row_dir, 'contract.docx')
-            fill_doc_template(tmpl_path, fill_data, filled_docx)
-            img_path = docx_to_single_image(filled_docx, row_dir, 'contract')
-            return send_file(img_path, mimetype='image/png',
+    rows = [{field_key: record.get(col_name, '') for field_key, col_name in mapping.items()} for record in records]
+    try:
+        result = generate_contract_images(tmpl_path, rows, task_id)
+        if result.get('single_image'):
+            return send_file(result['single_image'], mimetype='image/png',
                              as_attachment=True, download_name='合同.png')
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
-
-    zip_path = os.path.join(app.config['OUTPUT_FOLDER'], task_id + '.zip')
-    errors = []
-    generated = 0
-
-    with zipfile.ZipFile(zip_path, 'w') as zf:
-        for idx, record in enumerate(records):
-            raw = {field_key: record.get(col_name, '') for field_key, col_name in mapping.items()}
-            fill_data = build_fill_data(raw)
-            row_dir = os.path.join(task_dir, 'row_%d' % (idx + 1))
-            os.makedirs(row_dir)
-            try:
-                filled_docx = os.path.join(row_dir, 'contract.docx')
-                fill_doc_template(tmpl_path, fill_data, filled_docx)
-                img_path = docx_to_single_image(filled_docx, row_dir, 'contract')
-                zf.write(img_path, '合同_%d.png' % (idx + 1))
-                generated += 1
-            except Exception as e:
-                errors.append('第%d行: %s' % (idx + 1, str(e)))
-                logger.error('Row %d failed: %s', idx + 1, e)
-
-    if generated == 0:
-        return jsonify({'error': '所有记录生成失败', 'details': errors}), 500
-
-    return jsonify({
-        'task_id': task_id,
-        'generated': generated,
-        'errors': errors,
-        'download_url': '/api/download/' + task_id
-    })
+        return jsonify(result)
+    except RuntimeError as e:
+        msg = str(e)
+        try:
+            parsed = json.loads(msg)
+            return jsonify(parsed), 500
+        except Exception:
+            return jsonify({'error': msg}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/download/<task_id>')

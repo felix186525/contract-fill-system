@@ -12,7 +12,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .header .author{font-size:12px;color:rgba(255,255,255,.86);padding-left:2px}
 .header .logout{margin-left:auto;color:#fff;text-decoration:none;font-size:13px;border:1px solid rgba(255,255,255,.55);border-radius:4px;padding:5px 10px}
 .header .logout:hover{background:rgba(255,255,255,.14)}
-.container{max-width:900px;margin:20px auto;padding:0 16px}
+.container{max-width:1180px;margin:20px auto;padding:0 16px}
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid #e0e0e0}
 .tab{padding:10px 24px;cursor:pointer;font-size:14px;font-weight:500;color:#666;border-bottom:3px solid transparent;margin-bottom:-2px;transition:all .15s}
 .tab.active{color:#1a73e8;border-bottom-color:#1a73e8}
@@ -44,6 +44,18 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .mapping-table th{background:#f5f7fa;padding:8px 10px;text-align:left;border:1px solid #e0e0e0}
 .mapping-table td{padding:6px 10px;border:1px solid #e0e0e0}
 .mapping-table select{width:100%;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:12px}
+.batch-tools{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.btn-light{background:#eef2f7;color:#334155}
+.btn-light:hover{background:#e2e8f0}
+.batch-scroll{overflow-x:auto;border:1px solid #e0e0e0;border-radius:6px}
+.batch-table{width:100%;min-width:1280px;border-collapse:collapse;font-size:12px}
+.batch-table th{background:#f5f7fa;color:#555;font-weight:600;padding:7px;border:1px solid #e0e0e0;white-space:nowrap}
+.batch-table td{position:relative;padding:5px;border:1px solid #e0e0e0;background:#fff}
+.batch-table input{width:100%;min-width:86px;padding:6px 7px;border:1px solid #d8dde6;border-radius:4px;font-size:12px}
+.batch-table input:focus{outline:none;border-color:#1a73e8}
+.batch-table .narrow{min-width:66px}
+.batch-table .date{min-width:126px}
+.icon-btn{border:0;background:#fff;color:#c53030;cursor:pointer;font-size:16px;line-height:1;padding:4px 6px}
 .progress-wrap{display:none;margin-top:14px}
 .progress-bar{height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden}
 .progress-fill{height:100%;background:#1a73e8;width:0;transition:width .3s;border-radius:3px}
@@ -123,7 +135,35 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
     </div>
 
     <div class="card">
-      <h2>② 上传Excel数据</h2>
+      <h2>② 手动批量导入</h2>
+      <p class="tip" style="margin-bottom:10px">直接输入车牌号、驾驶员姓名会自动匹配车辆和驾驶员资料；适合临时录入多份合同。</p>
+      <div class="batch-tools">
+        <button class="btn btn-light" type="button" onclick="addBatchRow()">＋ 添加一行</button>
+        <button class="btn btn-light" type="button" onclick="clearBatchRows()">清空</button>
+        <button class="btn btn-primary" id="rGenBtn" onclick="generateRows()" disabled>⚡ 手动批量生成</button>
+      </div>
+      <div class="batch-scroll">
+        <table class="batch-table">
+          <thead>
+            <tr>
+              <th>车牌号</th><th>座位数</th><th>车型</th>
+              <th>驾驶员1</th><th>电话1</th><th>证号1</th>
+              <th>驾驶员2</th><th>电话2</th><th>证号2</th>
+              <th>目的地</th><th>开始日期</th><th>结束日期</th><th>途经</th><th>费用</th><th>签订日期</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="batchBody"></tbody>
+        </table>
+      </div>
+      <div class="progress-wrap" id="rProgress">
+        <div class="progress-bar"><div class="progress-fill" id="rProgressFill"></div></div>
+        <div class="status-msg" id="rStatus">生成中...</div>
+      </div>
+      <div id="rResult"></div>
+    </div>
+
+    <div class="card">
+      <h2>③ 上传Excel数据</h2>
       <p class="tip" style="margin-bottom:10px">第一行为列标题，每行一份合同。</p>
       <div class="upload-area" id="eExcelArea" onclick="document.getElementById('eExcelInput').click()">
         <div style="font-size:28px;margin-bottom:6px">📊</div>
@@ -139,7 +179,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
     </div>
 
     <div class="card" id="eMappingCard" style="display:none">
-      <h2>③ 字段映射</h2>
+      <h2>④ 字段映射</h2>
       <table class="mapping-table">
         <thead><tr><th>合同字段</th><th>对应Excel列</th></tr></thead>
         <tbody id="eMappingBody"></tbody>
@@ -147,7 +187,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
     </div>
 
     <div class="card">
-      <h2>④ 批量生成</h2>
+      <h2>⑤ Excel批量生成</h2>
       <button class="btn btn-primary" id="eGenBtn" onclick="generateExcel()" disabled>⚡ 开始批量生成</button>
       <div class="progress-wrap" id="eProgress">
         <div class="progress-bar"><div class="progress-fill" id="eProgressFill"></div></div>
@@ -162,6 +202,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 const FIELDS = {{ fields | tojson }};
 let mTmplFile = null;
 let eTmplFile = null, eExcelFile = null, eHeaders = [];
+let batchRowSeq = 0;
 
 // ---- Tab切换 ----
 function switchTab(name) {
@@ -265,6 +306,12 @@ function plateTail(plate) {
   return text;
 }
 
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
 function renderSuggestions(input, items, render, onPick) {
   const box = ensureSuggestBox(input);
   if (!items.length) {
@@ -296,8 +343,8 @@ function initVehicleLookup() {
       .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
       .then(d => {
         renderSuggestions(input, d.items || [], item => {
-          return '<div class="suggest-title">' + item.plate + '</div>' +
-                 '<div class="suggest-meta">' + (item.seat_count || '-') + '座 / ' + (item.car_type || '-') + '</div>';
+          return '<div class="suggest-title">' + escapeHtml(item.plate) + '</div>' +
+                 '<div class="suggest-meta">' + escapeHtml(item.seat_count || '-') + '座 / ' + escapeHtml(item.car_type || '-') + '</div>';
         }, item => {
           setManualValue('plate', item.plate_tail || plateTail(item.plate));
           setManualValue('seat_count', item.seat_count || '');
@@ -321,8 +368,8 @@ function initDriverLookup(index) {
       .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
       .then(d => {
         renderSuggestions(nameInput, d.items || [], item => {
-          return '<div class="suggest-title">' + item.name + '</div>' +
-                 '<div class="suggest-meta">' + (item.phone || '-') + ' / ' + (item.cert || '-') + '</div>';
+          return '<div class="suggest-title">' + escapeHtml(item.name) + '</div>' +
+                 '<div class="suggest-meta">' + escapeHtml(item.phone || '-') + ' / ' + escapeHtml(item.cert || '-') + '</div>';
         }, item => {
           setManualValue('driver' + index + '_name', item.name || '');
           setManualValue('driver' + index + '_phone', item.phone || '');
@@ -339,7 +386,185 @@ document.addEventListener('DOMContentLoaded', () => {
   initVehicleLookup();
   initDriverLookup(1);
   initDriverLookup(2);
+  addBatchRow();
 });
+
+// ---- 手动批量 ----
+function rowInput(tr, key) {
+  return tr.querySelector('[data-field="' + key + '"]');
+}
+
+function setRowValue(tr, key, value) {
+  const el = rowInput(tr, key);
+  if (el && value !== undefined && value !== null) el.value = value;
+}
+
+function batchCell(key, type, cls) {
+  const inputType = type || 'text';
+  const extra = cls || '';
+  return '<td><input type="' + inputType + '" class="' + extra + '" data-field="' + key + '" autocomplete="off"></td>';
+}
+
+function addBatchRow(row) {
+  const tbody = document.getElementById('batchBody');
+  const tr = document.createElement('tr');
+  tr.dataset.rowId = String(++batchRowSeq);
+  tr.innerHTML =
+    batchCell('plate') + batchCell('seat_count', 'text', 'narrow') + batchCell('car_type') +
+    batchCell('driver1_name') + batchCell('driver1_phone') + batchCell('driver1_cert') +
+    batchCell('driver2_name') + batchCell('driver2_phone') + batchCell('driver2_cert') +
+    batchCell('dest') + batchCell('start_date', 'date', 'date') + batchCell('end_date', 'date', 'date') +
+    batchCell('route') + batchCell('fee', 'text', 'narrow') + batchCell('sign_date', 'date', 'date') +
+    '<td><button class="icon-btn" type="button" title="删除" onclick="removeBatchRow(this)">✕</button></td>';
+  tbody.appendChild(tr);
+
+  if (row) {
+    Object.keys(row).forEach(k => setRowValue(tr, k, row[k]));
+  }
+  initBatchVehicleLookup(tr);
+  initBatchDriverLookup(tr, 1);
+  initBatchDriverLookup(tr, 2);
+  tr.querySelectorAll('input').forEach(input => input.addEventListener('input', checkRowsReady));
+  checkRowsReady();
+}
+
+function removeBatchRow(btn) {
+  btn.closest('tr').remove();
+  if (!document.querySelectorAll('#batchBody tr').length) addBatchRow();
+  checkRowsReady();
+}
+
+function clearBatchRows() {
+  document.getElementById('batchBody').innerHTML = '';
+  addBatchRow();
+}
+
+function initBatchVehicleLookup(tr) {
+  const input = rowInput(tr, 'plate');
+  const search = debounce(() => {
+    const q = input.value.trim();
+    if (!q) { hideSuggestBox(input); return; }
+    fetch('/api/lookup/vehicle?q=' + encodeURIComponent(q))
+      .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
+      .then(d => {
+        renderSuggestions(input, d.items || [], item => {
+          return '<div class="suggest-title">' + escapeHtml(item.plate) + '</div>' +
+                 '<div class="suggest-meta">' + escapeHtml(item.seat_count || '-') + '座 / ' + escapeHtml(item.car_type || '-') + '</div>';
+        }, item => {
+          setRowValue(tr, 'plate', item.plate_tail || plateTail(item.plate));
+          setRowValue(tr, 'seat_count', item.seat_count || '');
+          setRowValue(tr, 'car_type', item.car_type || '');
+          tr.dataset.transportCert = item.transport_cert || '';
+          checkRowsReady();
+        });
+      })
+      .catch(() => hideSuggestBox(input));
+  }, 180);
+  input.addEventListener('input', search);
+  input.addEventListener('blur', () => setTimeout(() => hideSuggestBox(input), 160));
+}
+
+function initBatchDriverLookup(tr, index) {
+  const nameInput = rowInput(tr, 'driver' + index + '_name');
+  const search = debounce(() => {
+    const q = nameInput.value.trim();
+    if (!q) { hideSuggestBox(nameInput); return; }
+    fetch('/api/lookup/driver?q=' + encodeURIComponent(q))
+      .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
+      .then(d => {
+        renderSuggestions(nameInput, d.items || [], item => {
+          return '<div class="suggest-title">' + escapeHtml(item.name) + '</div>' +
+                 '<div class="suggest-meta">' + escapeHtml(item.phone || '-') + ' / ' + escapeHtml(item.cert || '-') + '</div>';
+        }, item => {
+          setRowValue(tr, 'driver' + index + '_name', item.name || '');
+          setRowValue(tr, 'driver' + index + '_phone', item.phone || '');
+          setRowValue(tr, 'driver' + index + '_cert', item.cert || '');
+          checkRowsReady();
+        });
+      })
+      .catch(() => hideSuggestBox(nameInput));
+  }, 180);
+  nameInput.addEventListener('input', search);
+  nameInput.addEventListener('blur', () => setTimeout(() => hideSuggestBox(nameInput), 160));
+}
+
+function collectBatchRows() {
+  const rows = [];
+  document.querySelectorAll('#batchBody tr').forEach(tr => {
+    const row = {};
+    tr.querySelectorAll('input[data-field]').forEach(input => {
+      const value = input.value.trim();
+      if (value) row[input.dataset.field] = value;
+    });
+    if (tr.dataset.transportCert && !row.transport_cert) row.transport_cert = tr.dataset.transportCert;
+    if (Object.keys(row).length) rows.push(row);
+  });
+  return rows;
+}
+
+function hasBatchRows() {
+  return collectBatchRows().length > 0;
+}
+
+function checkRowsReady() {
+  const btn = document.getElementById('rGenBtn');
+  if (btn) btn.disabled = !(eTmplFile && hasBatchRows());
+}
+
+function handleGenerateResponse(resp, prefix, imageName) {
+  document.getElementById(prefix + 'ProgressFill').style.width = '100%';
+  const ct = resp.headers.get('content-type') || '';
+  if (ct.includes('image/png')) {
+    document.getElementById(prefix + 'Status').textContent = '完成！正在下载...';
+    return resp.blob().then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = imageName || '合同.png'; a.click();
+      URL.revokeObjectURL(url);
+      document.getElementById(prefix + 'Result').innerHTML = '<div class="success-box">✅ 合同图片已下载</div>';
+    });
+  }
+  return resp.json().then(d => {
+    if (d.error) {
+      document.getElementById(prefix + 'Status').textContent = '失败';
+      document.getElementById(prefix + 'Result').innerHTML = '<div class="error-box">❌ ' + escapeHtml(d.error) + '</div>';
+      return;
+    }
+    document.getElementById(prefix + 'Status').textContent = '完成！共生成 ' + d.generated + ' 份';
+    let html = '<div class="success-box">✅ 成功生成 <strong>' + d.generated + '</strong> 份合同图片 <a href="' + d.download_url + '">⬇ 下载ZIP</a></div>';
+    if (d.errors && d.errors.length) {
+      html += '<div class="error-box" style="margin-top:8px">部分失败：<br>' + d.errors.map(escapeHtml).join('<br>') + '</div>';
+    }
+    document.getElementById(prefix + 'Result').innerHTML = html;
+  });
+}
+
+function generateRows() {
+  const rows = collectBatchRows();
+  if (!eTmplFile) { alert('请先上传模板'); return; }
+  if (!rows.length) { alert('请至少填写一行数据'); return; }
+
+  const btn = document.getElementById('rGenBtn');
+  btn.disabled = true;
+  document.getElementById('rProgress').style.display = 'block';
+  document.getElementById('rProgressFill').style.width = '30%';
+  document.getElementById('rStatus').textContent = '生成中，请稍候...';
+  document.getElementById('rResult').innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('template', eTmplFile);
+  fd.append('rows', JSON.stringify(rows));
+
+  fetch('/api/generate-rows', { method: 'POST', body: fd })
+    .then(resp => handleGenerateResponse(resp, 'r', '合同.png'))
+    .catch(err => {
+      document.getElementById('rStatus').textContent = '请求失败';
+      document.getElementById('rResult').innerHTML = '<div class="error-box">❌ ' + escapeHtml(err) + '</div>';
+    })
+    .finally(() => {
+      btn.disabled = !(eTmplFile && hasBatchRows());
+    });
+}
 
 // ---- Excel批量 ----
 function handleETmpl(input) {
@@ -349,6 +574,7 @@ function handleETmpl(input) {
   document.getElementById('eTmplInfo').style.display = 'flex';
   document.getElementById('eTmplArea').style.display = 'none';
   checkEReady();
+  checkRowsReady();
 }
 function clearETmpl() {
   eTmplFile = null;
@@ -356,6 +582,7 @@ function clearETmpl() {
   document.getElementById('eTmplInfo').style.display = 'none';
   document.getElementById('eTmplArea').style.display = 'block';
   checkEReady();
+  checkRowsReady();
 }
 
 function handleExcel(input) {
@@ -446,33 +673,8 @@ function generateExcel() {
 
   fetch('/api/generate', { method: 'POST', body: fd })
     .then(resp => {
-      document.getElementById('eProgressFill').style.width = '100%';
       btn.disabled = false;
-      // 单条：直接下载图片
-      const ct = resp.headers.get('content-type') || '';
-      if (ct.includes('image/png')) {
-        document.getElementById('eStatus').textContent = '完成！正在下载...';
-        return resp.blob().then(blob => {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = '合同.png'; a.click();
-          URL.revokeObjectURL(url);
-          document.getElementById('eResult').innerHTML = '<div class="success-box">✅ 合同图片已下载</div>';
-        });
-      }
-      return resp.json().then(d => {
-        if (d.error) {
-          document.getElementById('eStatus').textContent = '失败';
-          document.getElementById('eResult').innerHTML = '<div class="error-box">❌ ' + d.error + '</div>';
-          return;
-        }
-        document.getElementById('eStatus').textContent = '完成！共生成 ' + d.generated + ' 份';
-        let html = '<div class="success-box">✅ 成功生成 <strong>' + d.generated + '</strong> 份合同图片 <a href="' + d.download_url + '">⬇ 下载ZIP</a></div>';
-        if (d.errors && d.errors.length) {
-          html += '<div class="error-box" style="margin-top:8px">部分失败：<br>' + d.errors.join('<br>') + '</div>';
-        }
-        document.getElementById('eResult').innerHTML = html;
-      });
+      return handleGenerateResponse(resp, 'e', '合同.png');
     })
     .catch(err => {
       btn.disabled = false;
