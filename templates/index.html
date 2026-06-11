@@ -9,6 +9,8 @@
 body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fa;color:#333}
 .header{background:#1a73e8;color:#fff;padding:14px 24px;display:flex;align-items:center;gap:12px}
 .header h1{font-size:18px;font-weight:600}
+.header .logout{margin-left:auto;color:#fff;text-decoration:none;font-size:13px;border:1px solid rgba(255,255,255,.55);border-radius:4px;padding:5px 10px}
+.header .logout:hover{background:rgba(255,255,255,.14)}
 .container{max-width:900px;margin:20px auto;padding:0 16px}
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid #e0e0e0}
 .tab{padding:10px 24px;cursor:pointer;font-size:14px;font-weight:500;color:#666;border-bottom:3px solid transparent;margin-bottom:-2px;transition:all .15s}
@@ -18,9 +20,16 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .card{background:#fff;border-radius:0 8px 8px 8px;padding:24px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .card h2{font-size:15px;font-weight:600;margin-bottom:16px;color:#1a73e8;border-left:3px solid #1a73e8;padding-left:10px}
 .form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.form-item{position:relative}
 .form-item label{display:block;font-size:12px;color:#666;margin-bottom:4px}
 .form-item input{width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;transition:border-color .15s}
 .form-item input:focus{outline:none;border-color:#1a73e8}
+.suggest-box{position:absolute;z-index:20;left:0;right:0;top:100%;margin-top:2px;background:#fff;border:1px solid #d8dde6;border-radius:5px;box-shadow:0 8px 20px rgba(0,0,0,.12);display:none;max-height:220px;overflow:auto}
+.suggest-item{padding:8px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid #f0f0f0}
+.suggest-item:last-child{border-bottom:0}
+.suggest-item:hover{background:#f0f6ff}
+.suggest-title{font-size:13px;color:#1a73e8;font-weight:600;margin-bottom:2px}
+.suggest-meta{color:#666;line-height:1.5}
 .upload-area{border:2px dashed #ccc;border-radius:6px;padding:24px;text-align:center;cursor:pointer;transition:all .2s}
 .upload-area:hover,.upload-area.drag{border-color:#1a73e8;background:#f0f6ff}
 .upload-area input{display:none}
@@ -49,6 +58,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 <div class="header">
   <div>📄</div>
   <h1>合同批量填写系统</h1>
+  <a class="logout" href="/logout">退出</a>
 </div>
 <div class="container">
   <div class="tabs">
@@ -215,6 +225,119 @@ function generateManual() {
       document.getElementById('mResult').innerHTML = '<div class="error-box">❌ ' + err + '</div>';
     });
 }
+
+// ---- 敏感资料模糊匹配（仅登录后按需查询，不在前端保存完整列表） ----
+function debounce(fn, delay) {
+  let timer = null;
+  return function(...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  };
+}
+
+function ensureSuggestBox(input) {
+  let box = input.parentElement.querySelector('.suggest-box');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'suggest-box';
+    input.parentElement.appendChild(box);
+  }
+  return box;
+}
+
+function hideSuggestBox(input) {
+  const box = input.parentElement.querySelector('.suggest-box');
+  if (box) box.style.display = 'none';
+}
+
+function setManualValue(key, value) {
+  const el = document.getElementById('mf_' + key);
+  if (el && value !== undefined && value !== null) el.value = value;
+}
+
+function plateTail(plate) {
+  let text = (plate || '').trim();
+  text = text.replace(/^苏K-?/i, '').replace(/^K-?/i, '');
+  const idx = text.indexOf('(');
+  if (idx >= 0) text = text.slice(0, idx);
+  return text;
+}
+
+function renderSuggestions(input, items, render, onPick) {
+  const box = ensureSuggestBox(input);
+  if (!items.length) {
+    box.style.display = 'none';
+    return;
+  }
+  box.innerHTML = '';
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'suggest-item';
+    div.innerHTML = render(item);
+    div.addEventListener('mousedown', e => {
+      e.preventDefault();
+      onPick(item);
+      box.style.display = 'none';
+    });
+    box.appendChild(div);
+  });
+  box.style.display = 'block';
+}
+
+function initVehicleLookup() {
+  const input = document.getElementById('mf_plate');
+  if (!input) return;
+  const search = debounce(() => {
+    const q = input.value.trim();
+    if (!q) { hideSuggestBox(input); return; }
+    fetch('/api/lookup/vehicle?q=' + encodeURIComponent(q))
+      .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
+      .then(d => {
+        renderSuggestions(input, d.items || [], item => {
+          return '<div class="suggest-title">' + item.plate + '</div>' +
+                 '<div class="suggest-meta">' + (item.seat_count || '-') + '座 / ' + (item.car_type || '-') + '</div>';
+        }, item => {
+          setManualValue('plate', item.plate_tail || plateTail(item.plate));
+          setManualValue('seat_count', item.seat_count || '');
+          setManualValue('car_type', item.car_type || '');
+          setManualValue('transport_cert', item.transport_cert || '');
+        });
+      })
+      .catch(() => hideSuggestBox(input));
+  }, 180);
+  input.addEventListener('input', search);
+  input.addEventListener('blur', () => setTimeout(() => hideSuggestBox(input), 160));
+}
+
+function initDriverLookup(index) {
+  const nameInput = document.getElementById('mf_driver' + index + '_name');
+  if (!nameInput) return;
+  const search = debounce(() => {
+    const q = nameInput.value.trim();
+    if (!q) { hideSuggestBox(nameInput); return; }
+    fetch('/api/lookup/driver?q=' + encodeURIComponent(q))
+      .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
+      .then(d => {
+        renderSuggestions(nameInput, d.items || [], item => {
+          return '<div class="suggest-title">' + item.name + '</div>' +
+                 '<div class="suggest-meta">' + (item.phone || '-') + ' / ' + (item.cert || '-') + '</div>';
+        }, item => {
+          setManualValue('driver' + index + '_name', item.name || '');
+          setManualValue('driver' + index + '_phone', item.phone || '');
+          setManualValue('driver' + index + '_cert', item.cert || '');
+        });
+      })
+      .catch(() => hideSuggestBox(nameInput));
+  }, 180);
+  nameInput.addEventListener('input', search);
+  nameInput.addEventListener('blur', () => setTimeout(() => hideSuggestBox(nameInput), 160));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initVehicleLookup();
+  initDriverLookup(1);
+  initDriverLookup(2);
+});
 
 // ---- Excel批量 ----
 function handleETmpl(input) {

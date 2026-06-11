@@ -5,7 +5,8 @@ import zipfile
 import subprocess
 import logging
 import json
-from flask import Flask, request, jsonify, send_file, render_template
+import hmac
+from flask import Flask, request, jsonify, send_file, render_template, redirect, session, url_for
 import openpyxl
 try:
     import xlrd
@@ -17,16 +18,22 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('APP_SECRET_KEY', 'contract-fill-system-session-key')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'output'
+app.config['DATA_FOLDER'] = os.environ.get('CONTRACT_DATA_FOLDER', '/opt/contract-platform-data')
 
+LOGIN_USERNAME = 'admin'
+LOGIN_PASSWORD = 'yhd,123'
 ALLOWED_EXTENSIONS = {'doc', 'docx', 'xls', 'xlsx'}
+PRINT_PAGE_SIZE = (1654, 2339)
+PRINT_CONTENT_BOX = (85, 145, 1569, 2030)
 
 FIELD_DEFS = [
+    {'key': 'plate',         'label': '车牌号（苏K-后面部分）', 'example': '12345'},
     {'key': 'seat_count',    'label': '座位数',             'example': '45'},
     {'key': 'car_type',      'label': '车型',               'example': '大巴'},
-    {'key': 'plate',         'label': '车牌号（苏K-后面部分）', 'example': '12345'},
     {'key': 'driver1_name',  'label': '驾驶员1姓名',         'example': '张三'},
     {'key': 'driver1_phone', 'label': '驾驶员1电话',         'example': '13800000001'},
     {'key': 'driver1_cert',  'label': '驾驶员1从业资格证号',  'example': 'JS0001'},
@@ -45,7 +52,7 @@ FIELD_DEFS = [
 NANJING_BLANK_MAP = [
     (4,  0, 'seat_count'),
     (4,  1, 'car_type'),
-    (4,  2, 'plate'),
+    (4,  3, 'plate'),
     (5,  0, 'driver1_name'),
     (5,  1, 'driver1_phone'),
     (6,  0, 'driver1_cert'),
@@ -59,13 +66,22 @@ NANJING_BLANK_MAP = [
     (9,  5, 'end_year'),
     (9,  6, 'end_month'),
     (9,  7, 'end_day'),
-    (9,  8, 'dest'),
+    (9,  9, 'dest'),
     (10, 0, 'route'),
     (11, 2, 'fee'),
-    (28, 0, 'sign_year'),
-    (28, 1, 'sign_month'),
-    (28, 2, 'sign_day'),
+    (24, 0, 'sign_year'),
+    (24, 1, 'sign_month'),
+    (24, 2, 'sign_day'),
 ]
+
+VEHICLE_DATA_FILE = 'vehicles.xlsx'
+DRIVER_DATA_FILE = 'drivers.xlsx'
+DATA_CACHE = {
+    'vehicle_mtime': None,
+    'vehicle_records': [],
+    'driver_mtime': None,
+    'driver_records': [],
+}
 
 
 def read_excel(path):
@@ -95,8 +111,124 @@ def read_excel(path):
     return headers, records
 
 
+def compact_text(value):
+    if value is None:
+        return ''
+    text = str(value).strip()
+    if text.endswith('.0'):
+        text = text[:-2]
+    return text
+
+
+def normalize_query(value):
+    return re.sub(r'\s+', '', compact_text(value)).lower()
+
+
+def normalize_plate_query(value):
+    text = normalize_query(value).upper()
+    for prefix in ('苏K-', '苏K', 'K-', 'K'):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    if '(' in text:
+        text = text.split('(', 1)[0]
+    return text
+
+
+def load_records(kind):
+    if kind == 'vehicle':
+        filename = VEHICLE_DATA_FILE
+        mtime_key = 'vehicle_mtime'
+        records_key = 'vehicle_records'
+    else:
+        filename = DRIVER_DATA_FILE
+        mtime_key = 'driver_mtime'
+        records_key = 'driver_records'
+
+    path = os.path.join(app.config['DATA_FOLDER'], filename)
+    if not os.path.exists(path):
+        return []
+
+    mtime = os.path.getmtime(path)
+    if DATA_CACHE[mtime_key] == mtime:
+        return DATA_CACHE[records_key]
+
+    headers, rows = read_excel(path)
+    records = []
+    for row in rows:
+        if kind == 'vehicle':
+            plate = compact_text(row.get('车牌号码'))
+            if not plate:
+                continue
+            records.append({
+                'plate': plate,
+                'plate_tail': normalize_plate_query(plate),
+                'seat_count': compact_text(row.get('核载')),
+                'car_type': compact_text(row.get('车辆类型')),
+                'transport_cert': compact_text(row.get('道路运输证字号')),
+            })
+        else:
+            name = compact_text(row.get('姓名'))
+            if not name:
+                continue
+            records.append({
+                'name': name,
+                'phone': compact_text(row.get('手机')),
+                'cert': compact_text(row.get('从业资格证号')),
+            })
+
+    DATA_CACHE[mtime_key] = mtime
+    DATA_CACHE[records_key] = records
+    logger.info('Loaded %s records: %d', kind, len(records))
+    return records
+
+
+def rank_match(query, value):
+    q = normalize_query(query)
+    v = normalize_query(value)
+    if not q or not v:
+        return None
+    if v == q:
+        return 0
+    if v.startswith(q):
+        return 1
+    if q in v:
+        return 2
+    return None
+
+
+def rank_plate_match(query, plate, plate_tail):
+    q = normalize_plate_query(query)
+    if not q:
+        return None
+    candidates = [normalize_plate_query(plate), normalize_plate_query(plate_tail)]
+    if q in candidates:
+        return 0
+    if any(c.startswith(q) for c in candidates):
+        return 1
+    if any(q in c for c in candidates):
+        return 2
+    return None
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def is_logged_in():
+    return session.get('logged_in') is True
+
+
+@app.before_request
+def require_login():
+    allowed_endpoints = {'login', 'static'}
+    if request.endpoint in allowed_endpoints:
+        return None
+    if is_logged_in():
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'error': '请先登录'}), 401
+    return redirect(url_for('login', next=request.full_path if request.query_string else request.path))
 
 
 def normalize_plate(val):
@@ -159,42 +291,8 @@ def fill_doc_template(template_path, data, output_path):
 
 
 def _fix_to_single_page(doc):
-    """调整格式使所有内容适合单页A4输出"""
-    from docx.shared import Pt
-    from docx.enum.text import WD_LINE_SPACING
-    ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-
-    # 1. 修正页面：去landscape，竖向A4，收紧页边距
-    for sectPr in doc.element.body.iter('{%s}sectPr' % ns):
-        pgSz = sectPr.find('{%s}pgSz' % ns)
-        if pgSz is not None:
-            orient_key = '{%s}orient' % ns
-            if pgSz.get(orient_key) == 'landscape':
-                del pgSz.attrib[orient_key]
-            pgSz.set('{%s}w' % ns, '11906')
-            pgSz.set('{%s}h' % ns, '16838')
-        pgMar = sectPr.find('{%s}pgMar' % ns)
-        if pgMar is not None:
-            pgMar.set('{%s}top' % ns, '200')
-            pgMar.set('{%s}bottom' % ns, '100')
-            pgMar.set('{%s}left' % ns, '700')
-            pgMar.set('{%s}right' % ns, '700')
-
-    # 2. 所有run字体统一缩小到10.5pt（标题保持原大小）
-    for i, p in enumerate(doc.paragraphs):
-        for r in p.runs:
-            if i != 0:  # 跳过标题
-                if not r.font.size or r.font.size.pt > 10.5:
-                    r.font.size = Pt(10.5)
-        # 3. 行距：正文11pt固定，空行压为1pt
-        pf = p.paragraph_format
-        pf.space_before = Pt(0)
-        pf.space_after = Pt(0)
-        pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-        if p.text.strip():
-            pf.line_spacing = Pt(11)
-        else:
-            pf.line_spacing = Pt(1)
+    """尽量保留原Word/WPS排版，不强制改字体、字号或页边距。"""
+    return
 
 
 def run_cmd(cmd, timeout=60):
@@ -208,22 +306,172 @@ def run_cmd(cmd, timeout=60):
     return proc.returncode, stdout.decode('utf-8', errors='replace'), stderr.decode('utf-8', errors='replace')
 
 
+def _is_stamp_red(r, g, b):
+    return r > 115 and r - g > 22 and r - b > 18 and g < 225 and b < 225
+
+
+def _find_red_stamp_boxes(img):
+    """找出页面底部的红色印章区域，用于避免最终压缩导致印章变形。"""
+    pix = img.load()
+    width, height = img.size
+    mask = set()
+    for y in range(height):
+        for x in range(width):
+            if _is_stamp_red(*pix[x, y]):
+                mask.add((x, y))
+
+    seen = set()
+    comps = []
+    for point in list(mask):
+        if point in seen:
+            continue
+        stack = [point]
+        seen.add(point)
+        xs = []
+        ys = []
+        while stack:
+            x, y = stack.pop()
+            xs.append(x)
+            ys.append(y)
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if (nx, ny) in mask and (nx, ny) not in seen:
+                    seen.add((nx, ny))
+                    stack.append((nx, ny))
+        if len(xs) > 150:
+            comps.append((min(xs), min(ys), max(xs) + 1, max(ys) + 1, len(xs)))
+
+    bottom = [c for c in comps if c[1] > height * 0.75]
+    stamp_boxes = []
+    for group in (
+        [c for c in bottom if (c[0] + c[2]) / 2 < width / 2],
+        [c for c in bottom if (c[0] + c[2]) / 2 >= width / 2],
+    ):
+        if not group:
+            continue
+        group = sorted(group, key=lambda c: c[4], reverse=True)[:20]
+        stamp_boxes.append((
+            min(c[0] for c in group),
+            min(c[1] for c in group),
+            max(c[2] for c in group),
+            max(c[3] for c in group),
+        ))
+    return stamp_boxes
+
+
+def _print_page_with_round_stamps(source):
+    """把长内容压进打印页画布，同时保持红色印章按等比例显示。"""
+    from PIL import Image
+
+    page_w, page_h = PRINT_PAGE_SIZE
+    box_left, box_top, box_right, box_bottom = PRINT_CONTENT_BOX
+    box_w = box_right - box_left
+    box_h = box_bottom - box_top
+
+    canvas = Image.new('RGB', PRINT_PAGE_SIZE, (255, 255, 255))
+    canvas.paste(source.resize((box_w, box_h), Image.LANCZOS), (box_left, box_top))
+
+    src_w, src_h = source.size
+    scale_x = box_w / src_w
+    scale_y = box_h / src_h
+    canvas_pix = canvas.load()
+    erase_top = max(0, box_top + int(src_h * 0.75 * scale_y) - 80)
+    erase_bottom = min(page_h, box_bottom + 120)
+    for y in range(erase_top, erase_bottom):
+        for x in range(box_left, box_right):
+            if _is_stamp_red(*canvas_pix[x, y]):
+                canvas_pix[x, y] = (255, 255, 255)
+
+    for x1, y1, x2, y2 in _find_red_stamp_boxes(source):
+        pad = 18
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(src_w, x2 + pad)
+        y2 = min(src_h, y2 + pad)
+        crop = source.crop((x1, y1, x2, y2)).convert('RGBA')
+        data = []
+        for r, g, b, a in crop.getdata():
+            if _is_stamp_red(r, g, b):
+                data.append((r, g, b, 255))
+            else:
+                data.append((255, 255, 255, 0))
+        crop.putdata(data)
+
+        # 使用横向缩放比例回贴红章层，避免整页纵向压缩把圆章压成椭圆。
+        stamp_w = max(1, round(crop.width * scale_x))
+        stamp_h = max(1, round(crop.height * scale_x))
+        crop = crop.resize((stamp_w, stamp_h), Image.LANCZOS)
+        paste_x = box_left + round(x1 * scale_x)
+        paste_y = box_top + round(y1 * scale_y) - round((stamp_h - (y2 - y1) * scale_y) / 2)
+        canvas.paste(crop, (paste_x, paste_y), crop)
+
+    return canvas
+
+
 def docx_to_single_image(docx_path, output_dir, out_name='contract'):
-    """docx -> PDF -> 所有页拼成一张PNG"""
+    """docx -> odt(修改行距) -> PDF -> 按Word打印页比例输出PNG"""
+    import zipfile, re
+
+    # 先把 docx 转 odt
+    code_odt, _, err_odt = run_cmd(
+        ['libreoffice', '--headless', '--convert-to', 'odt', '--outdir', output_dir, docx_path]
+    )
+    odt_name = os.path.splitext(os.path.basename(docx_path))[0] + '.odt'
+    odt_path = os.path.join(output_dir, odt_name)
+
+    if code_odt == 0 and os.path.exists(odt_path):
+        # 在 odt 里直接压缩段落行距，贴近Word/WPS打印一页的视觉密度
+        fixed_odt = odt_path.replace('.odt', '_fixed.odt')
+        try:
+            with zipfile.ZipFile(odt_path) as zin:
+                content_xml = zin.read('content.xml').decode()
+                styles_xml = zin.read('styles.xml').decode()
+
+            def inject_line_height(xml):
+                def replacer(m):
+                    tag = m.group(0)
+                    if 'fo:line-height' not in tag:
+                        tag = tag.replace('<style:paragraph-properties',
+                                         '<style:paragraph-properties fo:line-height="55%"')
+                    return tag
+                xml = re.sub(r'<style:paragraph-properties[^>]*>', replacer, xml)
+                xml = re.sub(r'fo:margin-top="[^"]*"', 'fo:margin-top="0cm"', xml)
+                xml = re.sub(r'fo:margin-bottom="[^"]*"', 'fo:margin-bottom="0cm"', xml)
+                return xml
+
+            content_xml = inject_line_height(content_xml)
+            styles_xml = inject_line_height(styles_xml)
+
+            with zipfile.ZipFile(fixed_odt, 'w', zipfile.ZIP_DEFLATED) as zout:
+                with zipfile.ZipFile(odt_path) as zin:
+                    for item in zin.namelist():
+                        if item == 'content.xml':
+                            zout.writestr(item, content_xml.encode())
+                        elif item == 'styles.xml':
+                            zout.writestr(item, styles_xml.encode())
+                        else:
+                            zout.writestr(item, zin.read(item))
+
+            src_for_pdf = fixed_odt
+        except Exception:
+            src_for_pdf = docx_path  # 降级回原始docx
+    else:
+        src_for_pdf = docx_path
+
     code, out, err = run_cmd(
-        ['libreoffice', '--headless', '--convert-to', 'pdf', '--outdir', output_dir, docx_path]
+        ['libreoffice', '--headless', '--convert-to', 'pdf', '--outdir', output_dir, src_for_pdf]
     )
     if code != 0:
         raise RuntimeError('LibreOffice转换失败: ' + err)
 
-    pdf_name = os.path.splitext(os.path.basename(docx_path))[0] + '.pdf'
+    pdf_name = os.path.splitext(os.path.basename(src_for_pdf))[0] + '.pdf'
     pdf_path = os.path.join(output_dir, pdf_name)
     if not os.path.exists(pdf_path):
         raise RuntimeError('PDF文件未生成')
 
     img_prefix = os.path.join(output_dir, 'page')
-    # 只取第1页（文档内容实际在第1页，LibreOffice渲染差异导致部分内容溢出第2页）
-    code2, out2, err2 = run_cmd(['pdftoppm', '-r', '200', '-png', '-f', '1', '-l', '1', pdf_path, img_prefix])
+    code2, out2, err2 = run_cmd(
+        ['pdftoppm', '-r', '150', '-png', pdf_path, img_prefix]
+    )
     if code2 != 0:
         raise RuntimeError('pdftoppm转换失败: ' + err2)
 
@@ -235,34 +483,51 @@ def docx_to_single_image(docx_path, output_dir, out_name='contract'):
     if not pages:
         raise RuntimeError('未找到生成的图片')
 
-    final_path = os.path.join(output_dir, out_name + '.png')
+    from PIL import Image, ImageChops
 
-    if len(pages) == 1:
-        os.rename(pages[0], final_path)
+    MARGIN = 30  # 约5mm @150dpi
+
+    def get_content_bounds(img):
+        diff = ImageChops.difference(img, Image.new('RGB', img.size, (255, 255, 255)))
+        bb = diff.getbbox()
+        return bb
+
+    imgs = [Image.open(p).convert('RGB') for p in pages]
+
+    if len(imgs) == 1:
+        bb = get_content_bounds(imgs[0])
+        bottom = min(imgs[0].height, bb[3] + MARGIN) if bb else imgs[0].height
+        final = imgs[0].crop((0, 0, imgs[0].width, bottom))
     else:
-        from PIL import Image, ImageChops
-        def trim_white(img):
-            """裁掉图片四周纯白边框"""
-            bg = Image.new(img.mode, img.size, (255, 255, 255))
-            diff = ImageChops.difference(img, bg)
-            bbox = diff.getbbox()
-            if bbox:
-                # 只裁上下，保留左右原始宽度（避免不同页宽度不一致）
-                return img.crop((0, bbox[1], img.width, bbox[3]))
-            return img
+        # 第1页：从0到内容底部+边距（裁底部空白）
+        # 中间页/最后页：裁顶部分页空白（去掉page break空白），底部+边距
+        crops = []
+        for idx, img in enumerate(imgs):
+            bb = get_content_bounds(img)
+            if not bb:
+                continue
+            is_first = (idx == 0)
+            top = 0 if is_first else max(0, bb[1] - MARGIN)
+            bottom = min(img.height, bb[3] + MARGIN)
+            crops.append(img.crop((0, top, img.width, bottom)))
 
-        imgs = [Image.open(p) for p in pages]
-        # 裁掉每页上下空白边
-        trimmed = [trim_white(img) for img in imgs]
-        w = max(i.width for i in trimmed)
-        h = sum(i.height for i in trimmed)
+        if not crops:
+            raise RuntimeError('转换后的图片为空')
+
+        w = max(c.width for c in crops)
+        h = sum(c.height for c in crops)
         merged = Image.new('RGB', (w, h), (255, 255, 255))
         y = 0
-        for img in trimmed:
-            merged.paste(img, (0, y))
-            y += img.height
-        merged.save(final_path)
+        for c in crops:
+            merged.paste(c, ((w - c.width) // 2, y))
+            y += c.height
+        final = merged
 
+    if final.height / final.width > 1.6:
+        final = _print_page_with_round_stamps(final)
+
+    final_path = os.path.join(output_dir, out_name + '.png')
+    final.save(final_path)
     return final_path
 
 
@@ -296,9 +561,83 @@ def index():
     return render_template('index.html', fields=FIELD_DEFS)
 
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = ''
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        if hmac.compare_digest(username, LOGIN_USERNAME) and hmac.compare_digest(password, LOGIN_PASSWORD):
+            session.clear()
+            session['logged_in'] = True
+            session['username'] = LOGIN_USERNAME
+            next_url = request.form.get('next') or url_for('index')
+            if not next_url.startswith('/'):
+                next_url = url_for('index')
+            return redirect(next_url)
+        error = '账号或密码错误'
+    return render_template('login.html', error=error, next_url=request.args.get('next', ''))
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
 @app.route('/api/fields')
 def get_fields():
     return jsonify(FIELD_DEFS)
+
+
+@app.route('/api/lookup/vehicle')
+def lookup_vehicle():
+    query = request.args.get('q', '').strip()
+    if len(query) < 1:
+        return jsonify({'items': []})
+
+    matches = []
+    for record in load_records('vehicle'):
+        rank = rank_plate_match(query, record.get('plate', ''), record.get('plate_tail', ''))
+        if rank is None:
+            continue
+        matches.append((rank, record.get('plate', ''), record))
+
+    matches.sort(key=lambda item: (item[0], item[1]))
+    items = []
+    for _, _, record in matches[:8]:
+        items.append({
+            'plate': record.get('plate', ''),
+            'plate_tail': record.get('plate_tail', ''),
+            'seat_count': record.get('seat_count', ''),
+            'car_type': record.get('car_type', ''),
+            'transport_cert': record.get('transport_cert', ''),
+        })
+    return jsonify({'items': items})
+
+
+@app.route('/api/lookup/driver')
+def lookup_driver():
+    query = request.args.get('q', '').strip()
+    if len(query) < 1:
+        return jsonify({'items': []})
+
+    matches = []
+    for record in load_records('driver'):
+        rank = rank_match(query, record.get('name', ''))
+        if rank is None:
+            continue
+        matches.append((rank, record.get('name', ''), record))
+
+    matches.sort(key=lambda item: (item[0], item[1]))
+    items = []
+    for _, _, record in matches[:8]:
+        items.append({
+            'name': record.get('name', ''),
+            'phone': record.get('phone', ''),
+            'cert': record.get('cert', ''),
+        })
+    return jsonify({'items': items})
 
 
 @app.route('/api/parse-excel', methods=['POST'])

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 - 合同批量填写系统</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fa;color:#333;display:flex;align-items:center;justify-content:center;padding:24px}
+.login-card{width:100%;max-width:360px;background:#fff;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.08);padding:28px}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:22px;color:#1a73e8}
+.brand span{font-size:26px}
+.brand h1{font-size:18px;font-weight:600}
+.form-item{margin-bottom:14px}
+.form-item label{display:block;font-size:13px;color:#666;margin-bottom:6px}
+.form-item input{width:100%;padding:10px 12px;border:1px solid #d8dde6;border-radius:5px;font-size:14px}
+.form-item input:focus{outline:none;border-color:#1a73e8}
+.btn{width:100%;border:0;border-radius:6px;background:#1a73e8;color:#fff;font-size:14px;font-weight:600;padding:11px 16px;cursor:pointer;margin-top:4px}
+.btn:hover{background:#1557b0}
+.error{background:#fff5f5;border:1px solid #fed7d7;color:#c53030;border-radius:5px;font-size:13px;padding:9px 10px;margin-bottom:14px}
+</style>
+</head>
+<body>
+  <form class="login-card" method="post" action="/login">
+    <div class="brand">
+      <span>📄</span>
+      <h1>合同批量填写系统</h1>
+    </div>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <div class="form-item">
+      <label for="username">账号</label>
+      <input id="username" name="username" type="text" autocomplete="username" autofocus>
+    </div>
+    <div class="form-item">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password">
+    </div>
+    <button class="btn" type="submit">登录</button>
+  </form>
+</body>
+</html>
