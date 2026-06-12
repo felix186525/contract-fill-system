@@ -239,6 +239,11 @@ def compact_text(value):
     return text
 
 
+def normalize_vehicle_type(value):
+    text = compact_text(value)
+    return text[:1] if text else ''
+
+
 def normalize_query(value):
     return re.sub(r'\s+', '', compact_text(value)).lower()
 
@@ -616,7 +621,7 @@ def fill_doc_template(template_path, data, output_path):
             else:
                 run = para.add_run()
                 copy_run_style(template_run, run)
-            run.text = text
+            run.text = (' ' + text.strip() + ' ') if underline else text
             if underline:
                 run.underline = True
 
@@ -664,7 +669,10 @@ def fill_doc_template(template_path, data, output_path):
             for gap_i, val in replacements.items():
                 if gap_i < len(gaps):
                     m = gaps[gap_i]
-                    marks.append((m.start(), m.end(), str(val)))
+                    if isinstance(val, list):
+                        marks.append((m.start(), m.end(), val))
+                    else:
+                        marks.append((m.start(), m.end(), [(str(val), True)]))
             if not marks:
                 return
             marks.sort()
@@ -673,21 +681,105 @@ def fill_doc_template(template_path, data, output_path):
             for start, end, val in marks:
                 if start > pos:
                     segments.append((full[pos:start], False))
-                segments.append((val, True))
+                segments.extend(val)
                 pos = end
             if pos < len(full):
                 segments.append((full[pos:], False))
             rebuild_para_with_segments(para, segments)
 
-        para_replacements = defaultdict(dict)
-        for para_i, gap_i, key in NANJING_BLANK_MAP:
+        def gap_index_after(gaps, pos, before=None):
+            for idx, gap in enumerate(gaps):
+                if gap.start() >= pos and (before is None or gap.start() < before):
+                    return idx
+            return None
+
+        def add_replacement(target, gap_i, key):
             val = data.get(key, '')
-            if val:
-                para_replacements[para_i][gap_i] = val
+            if gap_i is not None and val:
+                target[gap_i] = val
+
+        para_replacements = defaultdict(dict)
+        driver_cert_key = None
+        merge_route_para_indexes = set()
+        for para_i, para in enumerate(doc.paragraphs):
+            full = ''.join(r.text for r in para.runs)
+            gaps = list(_re.finditer(r' {2,}', full))
+            if not gaps:
+                continue
+            replacements = para_replacements[para_i]
+
+            if '甲方向乙方提供' in full and '车号' in full:
+                add_replacement(replacements, 0, 'seat_count')
+                add_replacement(replacements, 1, 'car_type')
+                add_replacement(replacements, len(gaps) - 1, 'plate')
+
+            if '①驾驶员姓名' in full:
+                add_replacement(replacements, 0, 'driver1_name')
+                add_replacement(replacements, 1, 'driver1_phone')
+                driver_cert_key = 'driver1_cert'
+            elif '②驾驶员姓名' in full:
+                add_replacement(replacements, 0, 'driver2_name')
+                add_replacement(replacements, 1, 'driver2_phone')
+                driver_cert_key = 'driver2_cert'
+            elif '从业资格证号' in full and driver_cert_key:
+                add_replacement(replacements, 0, driver_cert_key)
+                driver_cert_key = None
+
+            if '道路运输证' in full and '用车时间' in full:
+                transport_pos = full.find('道路运输证')
+                time_pos = full.find('用车时间')
+                add_replacement(replacements, gap_index_after(gaps, transport_pos, time_pos), 'transport_cert')
+
+                from_pos = full.find('从', time_pos)
+                start_place_pos = full.find('起讫地点', time_pos)
+                date_gap_indexes = [
+                    idx for idx, gap in enumerate(gaps)
+                    if gap.start() >= from_pos and (start_place_pos < 0 or gap.start() < start_place_pos)
+                ][:6]
+                for gap_i, key in zip(date_gap_indexes, (
+                    'start_year', 'start_month', 'start_day',
+                    'end_year', 'end_month', 'end_day',
+                )):
+                    add_replacement(replacements, gap_i, key)
+
+                if start_place_pos >= 0:
+                    place_text = full[start_place_pos:]
+                    dest_pos = full.find('至', start_place_pos)
+                    route_pos = full.find('途经', start_place_pos)
+                    before = route_pos if route_pos >= 0 else None
+                    add_replacement(replacements, gap_index_after(gaps, dest_pos, before), 'dest')
+                    if route_pos >= 0:
+                        add_replacement(replacements, gap_index_after(gaps, route_pos), 'route')
+                    elif para_i + 1 < len(doc.paragraphs):
+                        next_text = ''.join(r.text for r in doc.paragraphs[para_i + 1].runs).strip()
+                        if next_text.startswith('途经') and data.get('route'):
+                            dest_gap_i = gap_index_after(gaps, dest_pos, before)
+                            if dest_gap_i is not None:
+                                replacements[dest_gap_i] = [
+                                    (str(data.get('dest', '')), True),
+                                    ('，途经', False),
+                                    (str(data.get('route', '')), True),
+                                ]
+                                merge_route_para_indexes.add(para_i + 1)
+
+            if full.strip().startswith('途经') and para_i not in merge_route_para_indexes:
+                add_replacement(replacements, 0, 'route')
+
+            if '运输费用' in full:
+                add_replacement(replacements, len(gaps) - 1, 'fee')
+
+            if '签订日期' in full:
+                sign_pos = full.find('签订日期')
+                sign_gap_indexes = [idx for idx, gap in enumerate(gaps) if gap.start() >= sign_pos][:3]
+                for gap_i, key in zip(sign_gap_indexes, ('sign_year', 'sign_month', 'sign_day')):
+                    add_replacement(replacements, gap_i, key)
 
         for para_i, replacements in para_replacements.items():
             if para_i < len(doc.paragraphs):
                 replace_blanks_in_para(doc.paragraphs[para_i], replacements)
+        for para_i in merge_route_para_indexes:
+            if para_i < len(doc.paragraphs):
+                rebuild_para_with_segments(doc.paragraphs[para_i], [])
 
     _fix_to_single_page(doc)
     doc.save(output_path)
@@ -711,6 +803,10 @@ def run_cmd(cmd, timeout=60):
 
 def _is_stamp_red(r, g, b):
     return r > 115 and r - g > 22 and r - b > 18 and g < 225 and b < 225
+
+
+def _is_stamp_red_loose(r, g, b):
+    return r > 80 and r >= g + 1 and r >= b + 1
 
 
 def _find_red_stamp_boxes(img):
@@ -761,7 +857,73 @@ def _find_red_stamp_boxes(img):
     return stamp_boxes
 
 
-def _print_page_with_round_stamps(source):
+def _extract_signature_image(docx_path, output_dir):
+    """从合同docx中提取底部手写签名图。"""
+    import io
+    import zipfile
+    from PIL import Image
+
+    try:
+        candidates = []
+        with zipfile.ZipFile(docx_path) as zf:
+            for name in zf.namelist():
+                if not name.startswith('word/media/'):
+                    continue
+                raw = zf.read(name)
+                try:
+                    img = Image.open(io.BytesIO(raw))
+                    width, height = img.size
+                except Exception:
+                    continue
+                if height <= 0:
+                    continue
+                ratio = width / height
+                if 1.4 <= ratio <= 2.6 and width >= 200:
+                    candidates.append((width * height, name, raw))
+        if not candidates:
+            return None
+        _, name, raw = sorted(candidates, reverse=True)[0]
+        ext = os.path.splitext(name)[1].lower() or '.png'
+        path = os.path.join(output_dir, 'signature' + ext)
+        with open(path, 'wb') as f:
+            f.write(raw)
+        return path
+    except Exception:
+        return None
+
+
+def _paste_signature(canvas, signature_path):
+    if not signature_path or not os.path.exists(signature_path):
+        return canvas
+
+    from PIL import Image
+
+    try:
+        sig = Image.open(signature_path).convert('RGBA')
+    except Exception:
+        return canvas
+
+    target_w = 145
+    target_h = max(1, round(sig.height * target_w / sig.width))
+    sig = sig.resize((target_w, target_h), Image.LANCZOS)
+
+    # 有些查看器把透明背景显示成黑色；若图片没有透明通道，则把近白背景转透明。
+    if sig.getchannel('A').getextrema() == (255, 255):
+        data = []
+        for r, g, b, a in sig.getdata():
+            if r > 245 and g > 245 and b > 245:
+                data.append((255, 255, 255, 0))
+            else:
+                data.append((r, g, b, 255))
+        sig.putdata(data)
+
+    x = 1240
+    y = 2115
+    canvas.paste(sig, (x, y), sig)
+    return canvas
+
+
+def _print_page_with_round_stamps(source, signature_path=None):
     """把长内容压进打印页画布，同时保持红色印章按等比例显示。"""
     from PIL import Image
 
@@ -781,14 +943,29 @@ def _print_page_with_round_stamps(source):
     canvas.paste(source.resize((scaled_w, scaled_h), Image.LANCZOS), (paste_left, paste_top))
 
     canvas_pix = canvas.load()
-    erase_top = max(0, paste_top + int(src_h * 0.75 * scale) - 80)
+    erase_top = max(0, paste_top + int(src_h * 0.65 * scale) - 80)
     erase_bottom = min(page_h, paste_top + scaled_h + 120)
     for y in range(erase_top, erase_bottom):
         for x in range(paste_left, min(page_w, paste_left + scaled_w)):
-            if _is_stamp_red(*canvas_pix[x, y]):
+            if _is_stamp_red_loose(*canvas_pix[x, y]):
                 canvas_pix[x, y] = (255, 255, 255)
 
-    for x1, y1, x2, y2 in _find_red_stamp_boxes(source):
+    stamp_boxes = _find_red_stamp_boxes(source)
+    stamp_meta = []
+    if stamp_boxes:
+        target_side = max(max(x2 - x1, y2 - y1) for x1, y1, x2, y2 in stamp_boxes)
+        centers_y = [(y1 + y2) / 2 for _, y1, _, y2 in stamp_boxes]
+        align_center_y = max(centers_y) if len(centers_y) >= 2 and max(centers_y) - min(centers_y) > 35 else None
+        for box in stamp_boxes:
+            x1, y1, x2, y2 = box
+            side = max(x2 - x1, y2 - y1)
+            size_factor = target_side / side if side and side < target_side * 0.92 else 1
+            stamp_meta.append((box, size_factor, align_center_y))
+
+    for (x1, y1, x2, y2), size_factor, align_center_y in stamp_meta:
+        core_x1, core_y1, core_x2, core_y2 = x1, y1, x2, y2
+        core_cx = (core_x1 + core_x2) / 2
+        core_cy = align_center_y if align_center_y is not None else (core_y1 + core_y2) / 2
         pad = 18
         x1 = max(0, x1 - pad)
         y1 = max(0, y1 - pad)
@@ -797,20 +974,21 @@ def _print_page_with_round_stamps(source):
         crop = source.crop((x1, y1, x2, y2)).convert('RGBA')
         data = []
         for r, g, b, a in crop.getdata():
-            if _is_stamp_red(r, g, b):
+            if _is_stamp_red_loose(r, g, b):
                 data.append((r, g, b, 255))
             else:
                 data.append((255, 255, 255, 0))
         crop.putdata(data)
 
         # 使用统一缩放比例回贴红章层，避免圆章和文字发生横纵变形。
-        stamp_w = max(1, round(crop.width * scale))
-        stamp_h = max(1, round(crop.height * scale))
+        stamp_w = max(1, round(crop.width * scale * size_factor))
+        stamp_h = max(1, round(crop.height * scale * size_factor))
         crop = crop.resize((stamp_w, stamp_h), Image.LANCZOS)
-        paste_x = paste_left + round(x1 * scale)
-        paste_y = paste_top + round(y1 * scale)
+        paste_x = paste_left + round(core_cx * scale - stamp_w / 2)
+        paste_y = paste_top + round(core_cy * scale - stamp_h / 2)
         canvas.paste(crop, (paste_x, paste_y), crop)
 
+    _paste_signature(canvas, signature_path)
     return canvas
 
 
@@ -877,6 +1055,8 @@ def _compact_vertical_whitespace(img, target_ratio):
 def docx_to_single_image(docx_path, output_dir, out_name='contract'):
     """docx -> odt(修改行距) -> PDF -> 按Word打印页比例输出PNG"""
     import zipfile, re
+
+    signature_path = _extract_signature_image(docx_path, output_dir)
 
     # 先把 docx 转 odt
     code_odt, _, err_odt = run_cmd(
@@ -996,7 +1176,7 @@ def docx_to_single_image(docx_path, output_dir, out_name='contract'):
 
     final = _compact_vertical_whitespace(final, (PRINT_CONTENT_BOX[3] - PRINT_CONTENT_BOX[1]) / (PRINT_CONTENT_BOX[2] - PRINT_CONTENT_BOX[0]))
 
-    final = _print_page_with_round_stamps(final)
+    final = _print_page_with_round_stamps(final, signature_path)
 
     final_path = os.path.join(output_dir, out_name + '.png')
     final.save(final_path)
@@ -1025,6 +1205,7 @@ def build_fill_data(source_data):
     data = dict(source_data)
     data = enrich_fill_data(data)
     data['plate'] = normalize_plate(data.get('plate', ''))
+    data['car_type'] = normalize_vehicle_type(data.get('car_type', ''))
     split_date(data, 'start_date', 'start_year', 'start_month', 'start_day')
     split_date(data, 'end_date',   'end_year',   'end_month',   'end_day')
     split_date(data, 'sign_date',  'sign_year',  'sign_month',  'sign_day')

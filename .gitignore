@@ -10,3 +10,4 @@ __pycache__/
 *.xlsx
 data/
 contract-platform-data/
+sig_images_xdf/
