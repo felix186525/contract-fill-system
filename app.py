@@ -9,6 +9,8 @@ import hmac
 import shutil
 import time
 from datetime import timedelta
+from urllib.parse import urlencode
+from urllib.request import urlopen
 from flask import Flask, request, jsonify, send_file, render_template, redirect, session, url_for
 import openpyxl
 try:
@@ -30,12 +32,14 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'output'
 app.config['DATA_FOLDER'] = os.environ.get('CONTRACT_DATA_FOLDER', '/opt/contract-platform-data')
 app.config['TEMPLATE_FOLDER'] = os.environ.get('CONTRACT_TEMPLATE_FOLDER', '/opt/contract-platform-templates/电子合同')
+app.config['AMAP_API_KEY'] = os.environ.get('AMAP_API_KEY') or os.environ.get('GAODE_API_KEY') or ''
 
 LOGIN_USERNAME = 'admin'
 LOGIN_PASSWORD = 'yhd,123'
 LOGIN_ATTEMPTS = {}
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 300
+IDLE_TIMEOUT_SECONDS = 300
 ALLOWED_EXTENSIONS = {'doc', 'docx', 'xls', 'xlsx'}
 PRINT_PAGE_SIZE = (1654, 2339)
 PRINT_CONTENT_BOX = (85, 145, 1569, 2030)
@@ -420,8 +424,101 @@ def get_builtin_template_path(template_id):
     return path
 
 
+def fetch_json(url, params):
+    full_url = url + '?' + urlencode(params)
+    with urlopen(full_url, timeout=8) as resp:
+        body = resp.read().decode('utf-8')
+    return json.loads(body)
+
+
+def amap_geocode(address):
+    key = app.config['AMAP_API_KEY']
+    if not key:
+        raise RuntimeError('服务器未配置高德地图Key，请配置 AMAP_API_KEY')
+    result = fetch_json('https://restapi.amap.com/v3/geocode/geo', {
+        'key': key,
+        'address': address,
+        'output': 'json',
+    })
+    if result.get('status') != '1':
+        raise RuntimeError(result.get('info') or '地址解析失败')
+    geocodes = result.get('geocodes') or []
+    if not geocodes:
+        raise RuntimeError('未找到地址：' + address)
+    item = geocodes[0]
+    location = item.get('location')
+    if not location:
+        raise RuntimeError('地址缺少坐标：' + address)
+    return {
+        'location': location,
+        'formatted_address': item.get('formatted_address') or address,
+    }
+
+
+def amap_route_between(origin_geo, dest_geo, waypoint_geos=None):
+    waypoint_geos = waypoint_geos or []
+    key = app.config['AMAP_API_KEY']
+    params = {
+        'key': key,
+        'origin': origin_geo['location'],
+        'destination': dest_geo['location'],
+        'strategy': 0,
+        'output': 'json',
+    }
+    if waypoint_geos:
+        params['waypoints'] = ';'.join(item['location'] for item in waypoint_geos)
+    result = fetch_json('https://restapi.amap.com/v3/direction/driving', params)
+    if result.get('status') != '1':
+        raise RuntimeError(result.get('info') or '路线规划失败')
+    paths = ((result.get('route') or {}).get('paths') or [])
+    if not paths:
+        raise RuntimeError('未找到驾车路线')
+    path = paths[0]
+    distance_m = int(float(path.get('distance') or 0))
+    duration_s = int(float(path.get('duration') or 0))
+    return distance_m, duration_s
+
+
+def amap_driving_distance(origin, destination, waypoints=None):
+    waypoints = waypoints or []
+    origin_geo = amap_geocode(origin)
+    dest_geo = amap_geocode(destination)
+    waypoint_geos = [amap_geocode(item) for item in waypoints if compact_text(item)]
+    distance_m, duration_s = amap_route_between(origin_geo, dest_geo, waypoint_geos)
+
+    nodes = [origin_geo] + waypoint_geos + [dest_geo]
+    segments = []
+    for idx in range(len(nodes) - 1):
+        seg_distance_m, seg_duration_s = amap_route_between(nodes[idx], nodes[idx + 1])
+        segments.append({
+            'from': nodes[idx]['formatted_address'],
+            'to': nodes[idx + 1]['formatted_address'],
+            'distance_m': seg_distance_m,
+            'distance_km': round(seg_distance_m / 1000, 1),
+            'duration_min': round(seg_duration_s / 60),
+        })
+
+    return {
+        'provider': 'amap',
+        'origin': origin_geo['formatted_address'],
+        'destination': dest_geo['formatted_address'],
+        'waypoints': [item['formatted_address'] for item in waypoint_geos],
+        'segments': segments,
+        'distance_m': distance_m,
+        'distance_km': round(distance_m / 1000, 1),
+        'duration_min': round(duration_s / 60),
+    }
+
+
 def is_logged_in():
     return session.get('logged_in') is True
+
+
+def session_expired():
+    last_active = session.get('last_active')
+    if not last_active:
+        return False
+    return time.time() - float(last_active) > IDLE_TIMEOUT_SECONDS
 
 
 def client_key():
@@ -451,10 +548,12 @@ def require_login():
     allowed_endpoints = {'login', 'static'}
     if request.endpoint in allowed_endpoints:
         return None
-    if is_logged_in():
+    if is_logged_in() and not session_expired():
+        session['last_active'] = time.time()
         return None
+    session.clear()
     if request.path.startswith('/api/'):
-        return jsonify({'error': '请先登录'}), 401
+        return jsonify({'error': '登录已过期，请重新登录'}), 401
     return redirect(url_for('login', next=request.full_path if request.query_string else request.path))
 
 
@@ -936,6 +1035,7 @@ def login():
             session.permanent = True
             session['logged_in'] = True
             session['username'] = LOGIN_USERNAME
+            session['last_active'] = time.time()
             next_url = request.form.get('next') or url_for('index')
             if not next_url.startswith('/'):
                 next_url = url_for('index')
@@ -959,6 +1059,24 @@ def get_fields():
 @app.route('/api/templates')
 def get_templates():
     return jsonify({'items': list_builtin_templates()})
+
+
+@app.route('/api/distance', methods=['POST'])
+def calculate_distance():
+    payload = request.get_json(silent=True) or {}
+    origin = compact_text(payload.get('origin'))
+    destination = compact_text(payload.get('destination'))
+    waypoints = payload.get('waypoints') or []
+    if not isinstance(waypoints, list):
+        return jsonify({'error': '途经地格式错误'}), 400
+    waypoints = [compact_text(item) for item in waypoints if compact_text(item)]
+    if not origin or not destination:
+        return jsonify({'error': '请输入出发地和目的地'}), 400
+    try:
+        return jsonify(amap_driving_distance(origin, destination, waypoints))
+    except Exception as e:
+        logger.error('calculate_distance failed: %s', e)
+        return jsonify({'error': str(e)}), 400
 
 
 @app.route('/api/lookup/vehicle')

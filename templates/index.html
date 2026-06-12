@@ -85,6 +85,20 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .edit-item label{display:block;font-size:12px;color:#666;margin-bottom:4px}
 .edit-item input{width:100%;padding:8px 9px;border:1px solid #d8dde6;border-radius:4px;font-size:13px}
 .modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 18px;border-top:1px solid #e5e7eb}
+.distance-grid{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end}
+.distance-item{position:relative}
+.distance-item label{display:block;font-size:12px;color:#666;margin-bottom:4px}
+.distance-item input{width:100%;padding:9px 11px;border:1px solid #d8dde6;border-radius:5px;font-size:14px}
+.distance-item input:focus{outline:none;border-color:#1a73e8}
+.waypoint-list{margin-top:12px;display:grid;gap:10px}
+.waypoint-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}
+.waypoint-row .distance-item{min-width:0}
+.distance-result{display:none;margin-top:14px;padding:16px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:6px;color:#1e3a8a}
+.distance-main{font-size:24px;font-weight:700;margin-bottom:6px}
+.distance-sub{font-size:13px;color:#475569;line-height:1.7}
+.distance-segments{margin-top:12px;border-top:1px solid #bfdbfe;padding-top:10px;display:grid;gap:6px}
+.distance-segment{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:#334155}
+.distance-segment strong{color:#1e3a8a;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -100,6 +114,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
     <div class="tab" onclick="switchTab('excel')">批量导入</div>
     <div class="tab" onclick="switchTab('drivers')">司机查询</div>
     <div class="tab" onclick="switchTab('vehicles')">车辆查询</div>
+    <div class="tab" onclick="switchTab('distance')">公里计算</div>
   </div>
 
   <!-- ===== 手动输入 ===== -->
@@ -252,6 +267,29 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
       <div id="vehicleResults" class="data-wrap" style="display:none"></div>
     </div>
   </div>
+
+  <div id="tab-distance" class="tab-panel">
+    <div class="card">
+      <h2>公里数自动计算</h2>
+      <p class="tip" style="margin-bottom:10px">输入出发地和目的地，按高德地图驾车路线计算公里数。</p>
+      <div class="distance-grid">
+        <div class="distance-item">
+          <label>出发地</label>
+          <input type="text" id="distanceOrigin" value="扬州" autocomplete="off">
+        </div>
+        <div class="distance-item">
+          <label>目的地</label>
+          <input type="text" id="distanceDestination" placeholder="例如：南京、上海、扬中" autocomplete="off">
+        </div>
+        <button class="btn btn-primary" type="button" id="distanceBtn" onclick="calculateDistance()">计算公里数</button>
+      </div>
+      <div class="batch-tools" style="margin-top:12px;margin-bottom:0">
+        <button class="btn btn-light" type="button" onclick="addWaypoint()">＋ 添加途经地</button>
+      </div>
+      <div id="waypointList" class="waypoint-list"></div>
+      <div id="distanceResult" class="distance-result"></div>
+    </div>
+  </div>
 </div>
 
 <div class="modal-mask" id="editModal">
@@ -280,6 +318,7 @@ let mTemplateId = '';
 let eTemplateId = '';
 let builtinTemplates = [];
 let batchRowSeq = 0;
+let idleLogoutTimer = null;
 const managedState = {
   driver: { headers: [], items: [] },
   vehicle: { headers: [], items: [] },
@@ -318,9 +357,23 @@ const CHINA_CITY_NAMES = Array.from(new Set(`
 香港 澳门 台北 新北 桃园 台中 台南 高雄 基隆 新竹 嘉义
 `.trim().split(/\s+/)));
 
+function resetIdleLogoutTimer() {
+  clearTimeout(idleLogoutTimer);
+  idleLogoutTimer = setTimeout(() => {
+    window.location.href = '/logout?timeout=1';
+  }, 5 * 60 * 1000);
+}
+
+function initIdleLogout() {
+  ['click', 'keydown', 'mousemove', 'scroll', 'touchstart'].forEach(eventName => {
+    window.addEventListener(eventName, resetIdleLogoutTimer, { passive: true });
+  });
+  resetIdleLogoutTimer();
+}
+
 // ---- Tab切换 ----
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['manual','excel','drivers','vehicles'][i] === name));
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['manual','excel','drivers','vehicles','distance'][i] === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
 }
@@ -615,6 +668,7 @@ function initDriverLookup(index) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  initIdleLogout();
   loadTemplates();
   setManualDateDefaults();
   initVehicleLookup();
@@ -622,6 +676,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initDriverLookup(2);
   initCityLookup(document.getElementById('mf_dest'), false);
   initCityLookup(document.getElementById('mf_route'), true);
+  initCityLookup(document.getElementById('distanceOrigin'), false);
+  initCityLookup(document.getElementById('distanceDestination'), false);
   addBatchRow();
   ['driver', 'vehicle'].forEach(kind => {
     const input = document.getElementById(kind + 'Search');
@@ -748,6 +804,75 @@ function saveManagedEdit() {
     })
     .catch(err => {
       document.getElementById('editError').innerHTML = '<div class="error-box">❌ ' + escapeHtml(err) + '</div>';
+    })
+    .finally(() => {
+      btn.disabled = false;
+    });
+}
+
+function addWaypoint(value) {
+  const list = document.getElementById('waypointList');
+  const row = document.createElement('div');
+  row.className = 'waypoint-row';
+  row.innerHTML =
+    '<div class="distance-item"><label>途经地</label><input type="text" class="distanceWaypoint" placeholder="例如：镇江" autocomplete="off"></div>' +
+    '<button class="btn btn-light" type="button" onclick="removeWaypoint(this)">删除</button>';
+  list.appendChild(row);
+  const input = row.querySelector('.distanceWaypoint');
+  if (value) input.value = value;
+  initCityLookup(input, false);
+}
+
+function removeWaypoint(btn) {
+  btn.closest('.waypoint-row').remove();
+}
+
+function collectWaypoints() {
+  return Array.from(document.querySelectorAll('.distanceWaypoint'))
+    .map(input => input.value.trim())
+    .filter(Boolean);
+}
+
+function calculateDistance() {
+  const origin = document.getElementById('distanceOrigin').value.trim();
+  const destination = document.getElementById('distanceDestination').value.trim();
+  const waypoints = collectWaypoints();
+  const result = document.getElementById('distanceResult');
+  const btn = document.getElementById('distanceBtn');
+  if (!origin || !destination) {
+    result.style.display = 'block';
+    result.innerHTML = '<div class="error-box">请输入出发地和目的地</div>';
+    return;
+  }
+
+  btn.disabled = true;
+  result.style.display = 'block';
+  result.innerHTML = '<div class="status-msg">正在查询地图路线...</div>';
+  fetch('/api/distance', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ origin, destination, waypoints })
+  })
+    .then(r => r.status === 401 ? Promise.reject('登录已过期，请重新登录') : r.json())
+    .then(d => {
+      if (d.error) throw d.error;
+      const waypointText = d.waypoints && d.waypoints.length ?
+        '<br>途经地：' + escapeHtml(d.waypoints.join('、')) : '';
+      const segments = (d.segments || []).map((item, idx) => {
+        return '<div class="distance-segment"><span>' + (idx + 1) + '. ' +
+          escapeHtml(item.from) + ' → ' + escapeHtml(item.to) + '</span><strong>' +
+          escapeHtml(item.distance_km) + ' 公里</strong></div>';
+      }).join('');
+      result.innerHTML =
+        '<div class="distance-main">总距离 ' + escapeHtml(d.distance_km) + ' 公里</div>' +
+        '<div class="distance-sub">出发地：' + escapeHtml(d.origin) +
+        '<br>目的地：' + escapeHtml(d.destination) +
+        waypointText +
+        '<br>预计车程：' + escapeHtml(d.duration_min) + ' 分钟</div>' +
+        (segments ? '<div class="distance-segments">' + segments + '</div>' : '');
+    })
+    .catch(err => {
+      result.innerHTML = '<div class="error-box">❌ ' + escapeHtml(err) + '</div>';
     })
     .finally(() => {
       btn.disabled = false;
