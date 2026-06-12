@@ -25,7 +25,9 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .form-item label{display:block;font-size:12px;color:#666;margin-bottom:4px}
 .form-item input{width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;transition:border-color .15s}
 .form-item input:focus{outline:none;border-color:#1a73e8}
-.suggest-box{position:absolute;z-index:20;left:0;right:0;top:100%;margin-top:2px;background:#fff;border:1px solid #d8dde6;border-radius:5px;box-shadow:0 8px 20px rgba(0,0,0,.12);display:none;max-height:220px;overflow:auto}
+.template-select{width:100%;padding:9px 11px;border:1px solid #d8dde6;border-radius:5px;font-size:14px;background:#fff;margin-bottom:12px}
+.template-select:focus{outline:none;border-color:#1a73e8}
+.suggest-box{position:fixed;z-index:1000;background:#fff;border:1px solid #d8dde6;border-radius:5px;box-shadow:0 8px 20px rgba(0,0,0,.12);display:none;max-height:220px;overflow:auto}
 .suggest-item{padding:8px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid #f0f0f0}
 .suggest-item:last-child{border-bottom:0}
 .suggest-item:hover{background:#f0f6ff}
@@ -65,6 +67,24 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .success-box a{color:#1a73e8;font-weight:600}
 .tip{font-size:12px;color:#888;margin-top:6px}
 .sep{margin:16px 0;border:none;border-top:1px solid #eee}
+.search-row{display:flex;gap:10px;align-items:center;margin-bottom:14px}
+.search-row input{flex:1;padding:9px 11px;border:1px solid #d8dde6;border-radius:5px;font-size:14px}
+.search-row input:focus{outline:none;border-color:#1a73e8}
+.data-wrap{overflow:auto;border:1px solid #e0e0e0;border-radius:6px;background:#fff}
+.data-table{width:100%;min-width:1100px;border-collapse:collapse;font-size:12px}
+.data-table th{position:sticky;top:0;background:#f5f7fa;color:#555;font-weight:600;padding:8px;border:1px solid #e0e0e0;white-space:nowrap;text-align:left}
+.data-table td{padding:7px 8px;border:1px solid #e0e0e0;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.data-empty{padding:18px;text-align:center;color:#888;font-size:13px}
+.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.42);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal{width:min(920px,100%);max-height:86vh;background:#fff;border-radius:8px;box-shadow:0 18px 45px rgba(0,0,0,.24);display:flex;flex-direction:column}
+.modal-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid #e5e7eb}
+.modal-head h3{font-size:16px;color:#1a73e8;flex:1}
+.modal-close{border:0;background:#fff;font-size:20px;cursor:pointer;color:#64748b;line-height:1}
+.modal-body{padding:18px;overflow:auto}
+.edit-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.edit-item label{display:block;font-size:12px;color:#666;margin-bottom:4px}
+.edit-item input{width:100%;padding:8px 9px;border:1px solid #d8dde6;border-radius:4px;font-size:13px}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 18px;border-top:1px solid #e5e7eb}
 </style>
 </head>
 <body>
@@ -77,16 +97,21 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 <div class="container">
   <div class="tabs">
     <div class="tab active" onclick="switchTab('manual')">手动输入</div>
-    <div class="tab" onclick="switchTab('excel')">Excel批量</div>
+    <div class="tab" onclick="switchTab('excel')">批量导入</div>
+    <div class="tab" onclick="switchTab('drivers')">司机查询</div>
+    <div class="tab" onclick="switchTab('vehicles')">车辆查询</div>
   </div>
 
   <!-- ===== 手动输入 ===== -->
   <div id="tab-manual" class="tab-panel active">
     <div class="card">
-      <h2>上传Word模板</h2>
+      <h2>选择Word模板</h2>
+      <select class="template-select" id="mTemplateSelect" onchange="handleTemplateSelect('m')">
+        <option value="">加载模板中...</option>
+      </select>
       <div class="upload-area" id="mTmplArea" onclick="document.getElementById('mTmplInput').click()">
         <div style="font-size:28px;margin-bottom:6px">📄</div>
-        <div style="font-size:13px">点击选择 .doc / .docx 模板</div>
+        <div style="font-size:13px">或点击上传临时 .doc / .docx 模板</div>
         <input type="file" id="mTmplInput" accept=".doc,.docx" onchange="handleMTmpl(this)">
       </div>
       <div id="mTmplInfo" style="display:none" class="file-info">
@@ -99,6 +124,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
       <h2>填写合同字段</h2>
       <div class="form-grid" id="manualForm">
         {% for f in fields %}
+        {% if f.key != 'fee' %}
         <div class="form-item">
           <label>{{ f.label }}</label>
           {% if f.get('type') == 'date' %}
@@ -107,6 +133,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
           <input type="text" id="mf_{{ f.key }}" placeholder="{{ f.example }}" autocomplete="off">
           {% endif %}
         </div>
+        {% endif %}
         {% endfor %}
       </div>
       <hr class="sep">
@@ -122,10 +149,13 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
   <!-- ===== Excel批量 ===== -->
   <div id="tab-excel" class="tab-panel">
     <div class="card">
-      <h2>① 上传Word模板</h2>
+      <h2>① 选择Word模板</h2>
+      <select class="template-select" id="eTemplateSelect" onchange="handleTemplateSelect('e')">
+        <option value="">加载模板中...</option>
+      </select>
       <div class="upload-area" id="eTmplArea" onclick="document.getElementById('eTmplInput').click()">
         <div style="font-size:28px;margin-bottom:6px">📄</div>
-        <div style="font-size:13px">点击选择 .doc / .docx 模板</div>
+        <div style="font-size:13px">或点击上传临时 .doc / .docx 模板</div>
         <input type="file" id="eTmplInput" accept=".doc,.docx" onchange="handleETmpl(this)">
       </div>
       <div id="eTmplInfo" style="display:none" class="file-info">
@@ -136,7 +166,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 
     <div class="card">
       <h2>② 手动批量导入</h2>
-      <p class="tip" style="margin-bottom:10px">直接输入车牌号、驾驶员姓名会自动匹配车辆和驾驶员资料；适合临时录入多份合同。</p>
+      <p class="tip" style="margin-bottom:10px">车牌只从车辆资料中带出座位数、车型等信息；驾驶员姓名只从司机资料中带出电话、证号。两者独立，不做人车绑定校验。</p>
       <div class="batch-tools">
         <button class="btn btn-light" type="button" onclick="addBatchRow()">＋ 添加一行</button>
         <button class="btn btn-light" type="button" onclick="clearBatchRows()">清空</button>
@@ -148,8 +178,8 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
             <tr>
               <th>车牌号</th><th>座位数</th><th>车型</th>
               <th>驾驶员1</th><th>电话1</th><th>证号1</th>
-              <th>驾驶员2</th><th>电话2</th><th>证号2</th>
-              <th>目的地</th><th>开始日期</th><th>结束日期</th><th>途经</th><th>费用</th><th>签订日期</th><th></th>
+              <th>目的地</th><th>开始日期</th><th>结束日期</th><th>途经</th><th>签订日期</th>
+              <th>驾驶员2</th><th>电话2</th><th>证号2</th><th></th>
             </tr>
           </thead>
           <tbody id="batchBody"></tbody>
@@ -187,7 +217,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
     </div>
 
     <div class="card">
-      <h2>⑤ Excel批量生成</h2>
+      <h2>⑤ 批量生成</h2>
       <button class="btn btn-primary" id="eGenBtn" onclick="generateExcel()" disabled>⚡ 开始批量生成</button>
       <div class="progress-wrap" id="eProgress">
         <div class="progress-bar"><div class="progress-fill" id="eProgressFill"></div></div>
@@ -196,42 +226,186 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
       <div id="eResult"></div>
     </div>
   </div>
+
+  <div id="tab-drivers" class="tab-panel">
+    <div class="card">
+      <h2>司机查询与维护</h2>
+      <p class="tip" style="margin-bottom:10px">只查询司机资料，例如输入“刘”会列出姓名中包含刘的司机信息。</p>
+      <div class="search-row">
+        <input type="text" id="driverSearch" placeholder="输入司机姓名模糊查询" autocomplete="off">
+        <button class="btn btn-primary" type="button" onclick="searchManaged('driver')">查询</button>
+      </div>
+      <div id="driverStatus" class="tip">请输入姓名后查询。</div>
+      <div id="driverResults" class="data-wrap" style="display:none"></div>
+    </div>
+  </div>
+
+  <div id="tab-vehicles" class="tab-panel">
+    <div class="card">
+      <h2>车辆查询与维护</h2>
+      <p class="tip" style="margin-bottom:10px">只查询车辆资料，例如输入车牌数字会列出对应车辆信息。</p>
+      <div class="search-row">
+        <input type="text" id="vehicleSearch" placeholder="输入车牌数字模糊查询，如 12345" autocomplete="off">
+        <button class="btn btn-primary" type="button" onclick="searchManaged('vehicle')">查询</button>
+      </div>
+      <div id="vehicleStatus" class="tip">请输入车牌数字后查询。</div>
+      <div id="vehicleResults" class="data-wrap" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="editModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="editTitle">编辑资料</h3>
+      <button class="modal-close" type="button" onclick="closeEditModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="edit-grid" id="editGrid"></div>
+      <div id="editError"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-light" type="button" onclick="closeEditModal()">取消</button>
+      <button class="btn btn-primary" type="button" id="editSaveBtn" onclick="saveManagedEdit()">保存</button>
+    </div>
+  </div>
 </div>
 
 <script>
 const FIELDS = {{ fields | tojson }};
+const VISIBLE_FIELDS = FIELDS.filter(f => f.key !== 'fee');
 let mTmplFile = null;
 let eTmplFile = null, eExcelFile = null, eHeaders = [];
+let mTemplateId = '';
+let eTemplateId = '';
+let builtinTemplates = [];
 let batchRowSeq = 0;
+const managedState = {
+  driver: { headers: [], items: [] },
+  vehicle: { headers: [], items: [] },
+  edit: null
+};
+const CHINA_CITY_NAMES = Array.from(new Set(`
+北京 上海 天津 重庆 石家庄 唐山 秦皇岛 邯郸 邢台 保定 张家口 承德 沧州 廊坊 衡水
+太原 大同 阳泉 长治 晋城 朔州 晋中 运城 忻州 临汾 吕梁
+呼和浩特 包头 乌海 赤峰 通辽 鄂尔多斯 呼伦贝尔 巴彦淖尔 乌兰察布 兴安盟 锡林郭勒盟 阿拉善盟
+沈阳 大连 鞍山 抚顺 本溪 丹东 锦州 营口 阜新 辽阳 盘锦 铁岭 朝阳 葫芦岛
+长春 吉林 四平 辽源 通化 白山 松原 白城 延边
+哈尔滨 齐齐哈尔 鸡西 鹤岗 双鸭山 大庆 伊春 佳木斯 七台河 牡丹江 黑河 绥化 大兴安岭
+南京 无锡 徐州 常州 苏州 南通 连云港 淮安 盐城 扬州 镇江 泰州 宿迁
+江阴 宜兴 溧阳 常熟 张家港 昆山 太仓 启东 如皋 海安 如东 东台 高邮 仪征 扬中 丹阳 句容 靖江 泰兴 兴化
+杭州 宁波 温州 嘉兴 湖州 绍兴 金华 衢州 舟山 台州 丽水
+建德 慈溪 余姚 乐清 瑞安 海宁 桐乡 诸暨 义乌 永康 临海 温岭 龙泉
+合肥 芜湖 蚌埠 淮南 马鞍山 淮北 铜陵 安庆 黄山 滁州 阜阳 宿州 六安 亳州 池州 宣城
+福州 厦门 莆田 三明 泉州 漳州 南平 龙岩 宁德
+南昌 景德镇 萍乡 九江 新余 鹰潭 赣州 吉安 宜春 抚州 上饶
+济南 青岛 淄博 枣庄 东营 烟台 潍坊 济宁 泰安 威海 日照 临沂 德州 聊城 滨州 菏泽
+郑州 开封 洛阳 平顶山 安阳 鹤壁 新乡 焦作 濮阳 许昌 漯河 三门峡 南阳 商丘 信阳 周口 驻马店 济源
+武汉 黄石 十堰 宜昌 襄阳 鄂州 荆门 孝感 荆州 黄冈 咸宁 随州 恩施 仙桃 潜江 天门 神农架
+长沙 株洲 湘潭 衡阳 邵阳 岳阳 常德 张家界 益阳 郴州 永州 怀化 娄底 湘西
+广州 韶关 深圳 珠海 汕头 佛山 江门 湛江 茂名 肇庆 惠州 梅州 汕尾 河源 阳江 清远 东莞 中山 潮州 揭阳 云浮
+南宁 柳州 桂林 梧州 北海 防城港 钦州 贵港 玉林 百色 贺州 河池 来宾 崇左
+海口 三亚 三沙 儋州 文昌 琼海 万宁 东方 五指山
+成都 自贡 攀枝花 泸州 德阳 绵阳 广元 遂宁 内江 乐山 南充 眉山 宜宾 广安 达州 雅安 巴中 资阳 阿坝 甘孜 凉山
+贵阳 六盘水 遵义 安顺 毕节 铜仁 黔西南 黔东南 黔南
+昆明 曲靖 玉溪 保山 昭通 丽江 普洱 临沧 楚雄 红河 文山 西双版纳 大理 德宏 怒江 迪庆
+拉萨 日喀则 昌都 林芝 山南 那曲 阿里
+西安 铜川 宝鸡 咸阳 渭南 延安 汉中 榆林 安康 商洛
+兰州 嘉峪关 金昌 白银 天水 武威 张掖 平凉 酒泉 庆阳 定西 陇南 临夏 甘南
+西宁 海东 海北 黄南 海南 果洛 玉树 海西
+银川 石嘴山 吴忠 固原 中卫
+乌鲁木齐 克拉玛依 吐鲁番 哈密 昌吉 博尔塔拉 巴音郭楞 阿克苏 克孜勒苏 喀什 和田 伊犁 塔城 阿勒泰 石河子 阿拉尔 图木舒克 五家渠 北屯 铁门关 双河 可克达拉 昆玉 胡杨河
+香港 澳门 台北 新北 桃园 台中 台南 高雄 基隆 新竹 嘉义
+`.trim().split(/\s+/)));
 
 // ---- Tab切换 ----
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['manual','excel'][i] === name));
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['manual','excel','drivers','vehicles'][i] === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
 }
 
 // ---- 手动输入 ----
+function hasManualTemplate() {
+  return !!(mTmplFile || mTemplateId);
+}
+
+function hasBatchTemplate() {
+  return !!(eTmplFile || eTemplateId);
+}
+
+function loadTemplates() {
+  fetch('/api/templates')
+    .then(r => r.json())
+    .then(d => {
+      builtinTemplates = d.items || [];
+      renderTemplateSelect('m');
+      renderTemplateSelect('e');
+    })
+    .catch(() => {
+      renderTemplateSelect('m', true);
+      renderTemplateSelect('e', true);
+    });
+}
+
+function renderTemplateSelect(prefix, failed) {
+  const select = document.getElementById(prefix + 'TemplateSelect');
+  if (!select) return;
+  const current = select.value;
+  let html = '<option value="">-- 请选择模板 --</option>';
+  builtinTemplates.forEach(t => {
+    html += '<option value="' + escapeAttr(t.id) + '">' + escapeHtml(t.name) + '</option>';
+  });
+  if (failed) html = '<option value="">模板加载失败，可上传临时模板</option>';
+  select.innerHTML = html;
+  if (current && builtinTemplates.some(t => t.id === current)) select.value = current;
+  if (!select.value && builtinTemplates.length) select.value = builtinTemplates[0].id;
+  handleTemplateSelect(prefix);
+}
+
+function handleTemplateSelect(prefix) {
+  const select = document.getElementById(prefix + 'TemplateSelect');
+  const value = select ? select.value : '';
+  if (prefix === 'm') {
+    mTemplateId = value;
+    if (value) clearMTmpl(false);
+    document.getElementById('mGenBtn').disabled = !hasManualTemplate();
+  } else {
+    eTemplateId = value;
+    if (value) clearETmpl(false);
+    checkEReady();
+    checkRowsReady();
+  }
+}
+
 function handleMTmpl(input) {
   if (!input.files[0]) return;
   mTmplFile = input.files[0];
+  mTemplateId = '';
+  const select = document.getElementById('mTemplateSelect');
+  if (select) select.value = '';
   document.getElementById('mTmplName').textContent = mTmplFile.name;
   document.getElementById('mTmplInfo').style.display = 'flex';
   document.getElementById('mTmplArea').style.display = 'none';
   document.getElementById('mGenBtn').disabled = false;
 }
-function clearMTmpl() {
+function clearMTmpl(clearSelect = true) {
   mTmplFile = null;
   document.getElementById('mTmplInput').value = '';
   document.getElementById('mTmplInfo').style.display = 'none';
   document.getElementById('mTmplArea').style.display = 'block';
-  document.getElementById('mGenBtn').disabled = true;
+  if (clearSelect) {
+    mTemplateId = '';
+    const select = document.getElementById('mTemplateSelect');
+    if (select) select.value = '';
+  }
+  document.getElementById('mGenBtn').disabled = !hasManualTemplate();
 }
 
 function generateManual() {
-  if (!mTmplFile) { alert('请先上传模板'); return; }
+  if (!hasManualTemplate()) { alert('请先选择或上传模板'); return; }
   const data = {};
-  FIELDS.forEach(f => {
+  VISIBLE_FIELDS.forEach(f => {
     const v = document.getElementById('mf_' + f.key).value.trim();
     if (v) data[f.key] = v;
   });
@@ -244,7 +418,8 @@ function generateManual() {
   document.getElementById('mResult').innerHTML = '';
 
   const fd = new FormData();
-  fd.append('template', mTmplFile);
+  if (mTmplFile) fd.append('template', mTmplFile);
+  else fd.append('template_id', mTemplateId);
   fd.append('data', JSON.stringify(data));
 
   fetch('/api/generate-manual', { method: 'POST', body: fd })
@@ -279,23 +454,35 @@ function debounce(fn, delay) {
 }
 
 function ensureSuggestBox(input) {
-  let box = input.parentElement.querySelector('.suggest-box');
+  let box = input._suggestBox;
   if (!box) {
     box = document.createElement('div');
     box.className = 'suggest-box';
-    input.parentElement.appendChild(box);
+    document.body.appendChild(box);
+    input._suggestBox = box;
   }
+  const rect = input.getBoundingClientRect();
+  box.style.left = rect.left + 'px';
+  box.style.top = (rect.bottom + 2) + 'px';
+  box.style.width = rect.width + 'px';
   return box;
 }
 
 function hideSuggestBox(input) {
-  const box = input.parentElement.querySelector('.suggest-box');
+  const box = input._suggestBox;
   if (box) box.style.display = 'none';
 }
 
 function setManualValue(key, value) {
   const el = document.getElementById('mf_' + key);
   if (el && value !== undefined && value !== null) el.value = value;
+}
+
+function setManualDateDefaults() {
+  ['start_date', 'end_date', 'sign_date'].forEach(key => {
+    const el = document.getElementById('mf_' + key);
+    if (el && !el.value) el.value = todayISO();
+  });
 }
 
 function plateTail(plate) {
@@ -310,6 +497,51 @@ function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+function cityQueryInfo(value) {
+  const text = value || '';
+  const separators = ['，', ',', '、', ' ', '　', ';', '；', '-', '至'];
+  let start = 0;
+  separators.forEach(sep => {
+    const idx = text.lastIndexOf(sep);
+    if (idx >= 0) start = Math.max(start, idx + sep.length);
+  });
+  return { prefix: text.slice(0, start), query: text.slice(start).trim() };
+}
+
+function citySuggestions(query) {
+  const q = (query || '').trim();
+  if (!q) return [];
+  return CHINA_CITY_NAMES
+    .filter(name => name === q || name.startsWith(q) || name.includes(q))
+    .sort((a, b) => {
+      const ar = a === q ? 0 : (a.startsWith(q) ? 1 : 2);
+      const br = b === q ? 0 : (b.startsWith(q) ? 1 : 2);
+      return ar - br || a.length - b.length || a.localeCompare(b, 'zh-Hans-CN');
+    })
+    .slice(0, 12);
+}
+
+function initCityLookup(input, appendMode) {
+  if (!input) return;
+  const search = debounce(() => {
+    const info = appendMode ? cityQueryInfo(input.value) : { prefix: '', query: input.value.trim() };
+    const items = citySuggestions(info.query);
+    renderSuggestions(input, items, item => {
+      return '<div class="suggest-title">' + escapeHtml(item) + '</div>' +
+             '<div class="suggest-meta">城市</div>';
+    }, item => {
+      input.value = info.prefix + item;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }, 120);
+  input.addEventListener('input', search);
+  input.addEventListener('blur', () => setTimeout(() => hideSuggestBox(input), 160));
 }
 
 function renderSuggestions(input, items, render, onPick) {
@@ -383,11 +615,144 @@ function initDriverLookup(index) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  loadTemplates();
+  setManualDateDefaults();
   initVehicleLookup();
   initDriverLookup(1);
   initDriverLookup(2);
+  initCityLookup(document.getElementById('mf_dest'), false);
+  initCityLookup(document.getElementById('mf_route'), true);
   addBatchRow();
+  ['driver', 'vehicle'].forEach(kind => {
+    const input = document.getElementById(kind + 'Search');
+    if (input) {
+      const autoSearch = debounce(() => searchManaged(kind), 220);
+      input.addEventListener('input', autoSearch);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') searchManaged(kind);
+      });
+    }
+  });
 });
+
+// ---- 司机/车辆查询维护 ----
+function managedLabel(kind) {
+  return kind === 'driver' ? '司机' : '车辆';
+}
+
+function managedEndpoint(kind) {
+  return kind === 'driver' ? '/api/manage/drivers' : '/api/manage/vehicles';
+}
+
+function searchManaged(kind) {
+  const input = document.getElementById(kind + 'Search');
+  const status = document.getElementById(kind + 'Status');
+  const result = document.getElementById(kind + 'Results');
+  const q = input.value.trim();
+  if (!q) {
+    status.textContent = kind === 'driver' ? '请输入司机姓名。' : '请输入车牌数字。';
+    result.style.display = 'none';
+    return;
+  }
+
+  status.textContent = '查询中...';
+  result.style.display = 'none';
+  fetch(managedEndpoint(kind) + '?q=' + encodeURIComponent(q))
+    .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
+    .then(d => {
+      if (d.error) throw d.error;
+      managedState[kind].headers = d.headers || [];
+      managedState[kind].items = d.items || [];
+      status.textContent = managedState[kind].items.length ?
+        '共找到 ' + managedState[kind].items.length + ' 条记录。' : '没有找到记录。';
+      renderManagedTable(kind);
+    })
+    .catch(err => {
+      status.textContent = '查询失败';
+      result.style.display = 'block';
+      result.innerHTML = '<div class="error-box">❌ ' + escapeHtml(err) + '</div>';
+    });
+}
+
+function renderManagedTable(kind) {
+  const result = document.getElementById(kind + 'Results');
+  const headers = managedState[kind].headers.filter(Boolean);
+  const items = managedState[kind].items;
+  result.style.display = 'block';
+  if (!items.length) {
+    result.innerHTML = '<div class="data-empty">暂无数据</div>';
+    return;
+  }
+
+  let html = '<table class="data-table"><thead><tr><th>操作</th>';
+  headers.forEach(h => html += '<th>' + escapeHtml(h) + '</th>');
+  html += '</tr></thead><tbody>';
+  items.forEach((item, idx) => {
+    html += `<tr><td><button class="btn btn-light" style="padding:5px 10px;font-size:12px" type="button" onclick="openEditModal('${kind}',${idx})">编辑</button></td>`;
+    headers.forEach(h => {
+      html += '<td title="' + escapeAttr(item.values[h] || '') + '">' + escapeHtml(item.values[h] || '') + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  result.innerHTML = html;
+}
+
+function openEditModal(kind, index) {
+  const item = managedState[kind].items[index];
+  if (!item) return;
+  const headers = managedState[kind].headers.filter(Boolean);
+  managedState.edit = { kind, index, id: item.id };
+  document.getElementById('editTitle').textContent = '编辑' + managedLabel(kind) + '资料';
+  document.getElementById('editError').innerHTML = '';
+
+  let html = '';
+  headers.forEach(h => {
+    html += '<div class="edit-item">' +
+      '<label>' + escapeHtml(h) + '</label>' +
+      '<input type="text" data-header="' + escapeAttr(h) + '" value="' + escapeAttr(item.values[h] || '') + '">' +
+      '</div>';
+  });
+  document.getElementById('editGrid').innerHTML = html;
+  document.getElementById('editModal').style.display = 'flex';
+}
+
+function closeEditModal() {
+  document.getElementById('editModal').style.display = 'none';
+  managedState.edit = null;
+}
+
+function saveManagedEdit() {
+  if (!managedState.edit) return;
+  const { kind, index, id } = managedState.edit;
+  const values = {};
+  document.querySelectorAll('#editGrid input[data-header]').forEach(input => {
+    values[input.dataset.header] = input.value.trim();
+  });
+
+  const btn = document.getElementById('editSaveBtn');
+  btn.disabled = true;
+  document.getElementById('editError').innerHTML = '';
+  fetch(managedEndpoint(kind) + '/' + encodeURIComponent(id), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ values })
+  })
+    .then(r => r.status === 401 ? Promise.reject('请先登录') : r.json())
+    .then(d => {
+      if (d.error) throw d.error;
+      managedState[kind].items[index].values = d.values || values;
+      renderManagedTable(kind);
+      closeEditModal();
+      document.getElementById(kind + 'Status').textContent = managedLabel(kind) + '资料已保存。';
+    })
+    .catch(err => {
+      document.getElementById('editError').innerHTML = '<div class="error-box">❌ ' + escapeHtml(err) + '</div>';
+    })
+    .finally(() => {
+      btn.disabled = false;
+    });
+}
 
 // ---- 手动批量 ----
 function rowInput(tr, key) {
@@ -405,6 +770,14 @@ function batchCell(key, type, cls) {
   return '<td><input type="' + inputType + '" class="' + extra + '" data-field="' + key + '" autocomplete="off"></td>';
 }
 
+function todayISO() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
 function addBatchRow(row) {
   const tbody = document.getElementById('batchBody');
   const tr = document.createElement('tr');
@@ -412,11 +785,14 @@ function addBatchRow(row) {
   tr.innerHTML =
     batchCell('plate') + batchCell('seat_count', 'text', 'narrow') + batchCell('car_type') +
     batchCell('driver1_name') + batchCell('driver1_phone') + batchCell('driver1_cert') +
-    batchCell('driver2_name') + batchCell('driver2_phone') + batchCell('driver2_cert') +
     batchCell('dest') + batchCell('start_date', 'date', 'date') + batchCell('end_date', 'date', 'date') +
-    batchCell('route') + batchCell('fee', 'text', 'narrow') + batchCell('sign_date', 'date', 'date') +
+    batchCell('route') + batchCell('sign_date', 'date', 'date') +
+    batchCell('driver2_name') + batchCell('driver2_phone') + batchCell('driver2_cert') +
     '<td><button class="icon-btn" type="button" title="删除" onclick="removeBatchRow(this)">✕</button></td>';
   tbody.appendChild(tr);
+  setRowValue(tr, 'start_date', todayISO());
+  setRowValue(tr, 'end_date', todayISO());
+  setRowValue(tr, 'sign_date', todayISO());
 
   if (row) {
     Object.keys(row).forEach(k => setRowValue(tr, k, row[k]));
@@ -424,6 +800,8 @@ function addBatchRow(row) {
   initBatchVehicleLookup(tr);
   initBatchDriverLookup(tr, 1);
   initBatchDriverLookup(tr, 2);
+  initCityLookup(rowInput(tr, 'dest'), false);
+  initCityLookup(rowInput(tr, 'route'), true);
   tr.querySelectorAll('input').forEach(input => input.addEventListener('input', checkRowsReady));
   checkRowsReady();
 }
@@ -508,7 +886,7 @@ function hasBatchRows() {
 
 function checkRowsReady() {
   const btn = document.getElementById('rGenBtn');
-  if (btn) btn.disabled = !(eTmplFile && hasBatchRows());
+  if (btn) btn.disabled = !(hasBatchTemplate() && hasBatchRows());
 }
 
 function handleGenerateResponse(resp, prefix, imageName) {
@@ -541,7 +919,7 @@ function handleGenerateResponse(resp, prefix, imageName) {
 
 function generateRows() {
   const rows = collectBatchRows();
-  if (!eTmplFile) { alert('请先上传模板'); return; }
+  if (!hasBatchTemplate()) { alert('请先选择或上传模板'); return; }
   if (!rows.length) { alert('请至少填写一行数据'); return; }
 
   const btn = document.getElementById('rGenBtn');
@@ -552,7 +930,8 @@ function generateRows() {
   document.getElementById('rResult').innerHTML = '';
 
   const fd = new FormData();
-  fd.append('template', eTmplFile);
+  if (eTmplFile) fd.append('template', eTmplFile);
+  else fd.append('template_id', eTemplateId);
   fd.append('rows', JSON.stringify(rows));
 
   fetch('/api/generate-rows', { method: 'POST', body: fd })
@@ -562,7 +941,7 @@ function generateRows() {
       document.getElementById('rResult').innerHTML = '<div class="error-box">❌ ' + escapeHtml(err) + '</div>';
     })
     .finally(() => {
-      btn.disabled = !(eTmplFile && hasBatchRows());
+      btn.disabled = !(hasBatchTemplate() && hasBatchRows());
     });
 }
 
@@ -570,17 +949,25 @@ function generateRows() {
 function handleETmpl(input) {
   if (!input.files[0]) return;
   eTmplFile = input.files[0];
+  eTemplateId = '';
+  const select = document.getElementById('eTemplateSelect');
+  if (select) select.value = '';
   document.getElementById('eTmplName').textContent = eTmplFile.name;
   document.getElementById('eTmplInfo').style.display = 'flex';
   document.getElementById('eTmplArea').style.display = 'none';
   checkEReady();
   checkRowsReady();
 }
-function clearETmpl() {
+function clearETmpl(clearSelect = true) {
   eTmplFile = null;
   document.getElementById('eTmplInput').value = '';
   document.getElementById('eTmplInfo').style.display = 'none';
   document.getElementById('eTmplArea').style.display = 'block';
+  if (clearSelect) {
+    eTemplateId = '';
+    const select = document.getElementById('eTemplateSelect');
+    if (select) select.value = '';
+  }
   checkEReady();
   checkRowsReady();
 }
@@ -631,7 +1018,7 @@ function clearExcel() {
 function buildMapping() {
   const tbody = document.getElementById('eMappingBody');
   tbody.innerHTML = '';
-  FIELDS.forEach(f => {
+  VISIBLE_FIELDS.forEach(f => {
     const opts = ['<option value="">-- 不映射 --</option>'];
     eHeaders.forEach(h => {
       const sel = (h === f.label || h === f.key) ? ' selected' : '';
@@ -644,7 +1031,7 @@ function buildMapping() {
 
 function getMapping() {
   const m = {};
-  FIELDS.forEach(f => {
+  VISIBLE_FIELDS.forEach(f => {
     const el = document.getElementById('map_' + f.key);
     if (el && el.value) m[f.key] = el.value;
   });
@@ -652,7 +1039,7 @@ function getMapping() {
 }
 
 function checkEReady() {
-  document.getElementById('eGenBtn').disabled = !(eTmplFile && eExcelFile && eHeaders.length);
+  document.getElementById('eGenBtn').disabled = !(hasBatchTemplate() && eExcelFile && eHeaders.length);
 }
 
 function generateExcel() {
@@ -667,7 +1054,8 @@ function generateExcel() {
   document.getElementById('eResult').innerHTML = '';
 
   const fd = new FormData();
-  fd.append('template', eTmplFile);
+  if (eTmplFile) fd.append('template', eTmplFile);
+  else fd.append('template_id', eTemplateId);
   fd.append('excel', eExcelFile);
   fd.append('mapping', JSON.stringify(mapping));
 

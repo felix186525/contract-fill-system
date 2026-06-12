@@ -6,6 +6,9 @@ import subprocess
 import logging
 import json
 import hmac
+import shutil
+import time
+from datetime import timedelta
 from flask import Flask, request, jsonify, send_file, render_template, redirect, session, url_for
 import openpyxl
 try:
@@ -20,12 +23,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'contract-fill-system-session-key')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'output'
 app.config['DATA_FOLDER'] = os.environ.get('CONTRACT_DATA_FOLDER', '/opt/contract-platform-data')
+app.config['TEMPLATE_FOLDER'] = os.environ.get('CONTRACT_TEMPLATE_FOLDER', '/opt/contract-platform-templates/电子合同')
 
 LOGIN_USERNAME = 'admin'
 LOGIN_PASSWORD = 'yhd,123'
+LOGIN_ATTEMPTS = {}
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCK_SECONDS = 300
 ALLOWED_EXTENSIONS = {'doc', 'docx', 'xls', 'xlsx'}
 PRINT_PAGE_SIZE = (1654, 2339)
 PRINT_CONTENT_BOX = (85, 145, 1569, 2030)
@@ -37,9 +47,6 @@ FIELD_DEFS = [
     {'key': 'driver1_name',  'label': '驾驶员1姓名',         'example': '张三'},
     {'key': 'driver1_phone', 'label': '驾驶员1电话',         'example': '13800000001'},
     {'key': 'driver1_cert',  'label': '驾驶员1从业资格证号',  'example': 'JS0001'},
-    {'key': 'driver2_name',  'label': '驾驶员2姓名',         'example': ''},
-    {'key': 'driver2_phone', 'label': '驾驶员2电话',         'example': ''},
-    {'key': 'driver2_cert',  'label': '驾驶员2从业资格证号',  'example': ''},
     {'key': 'transport_cert','label': '道路运输证号',        'example': 'YZ001'},
     {'key': 'start_date',    'label': '用车开始日期',        'example': '2026-06-15', 'type': 'date'},
     {'key': 'end_date',      'label': '用车结束日期',        'example': '2026-06-16', 'type': 'date'},
@@ -47,6 +54,9 @@ FIELD_DEFS = [
     {'key': 'route',         'label': '途经',               'example': '宁沪高速'},
     {'key': 'fee',           'label': '运输费用（元）',      'example': '2000'},
     {'key': 'sign_date',     'label': '签订日期',           'example': '2026-06-10', 'type': 'date'},
+    {'key': 'driver2_name',  'label': '驾驶员2姓名',         'example': ''},
+    {'key': 'driver2_phone', 'label': '驾驶员2电话',         'example': ''},
+    {'key': 'driver2_cert',  'label': '驾驶员2从业资格证号',  'example': ''},
 ]
 
 NANJING_BLANK_MAP = [
@@ -109,6 +119,111 @@ def read_excel(path):
                 continue
             records.append({headers[i]: (str(v) if v is not None else '') for i, v in enumerate(row)})
     return headers, records
+
+
+def data_file_path(kind):
+    filename = VEHICLE_DATA_FILE if kind == 'vehicle' else DRIVER_DATA_FILE
+    return os.path.join(app.config['DATA_FOLDER'], filename)
+
+
+def invalidate_data_cache(kind):
+    if kind == 'vehicle':
+        DATA_CACHE['vehicle_mtime'] = None
+        DATA_CACHE['vehicle_records'] = []
+    else:
+        DATA_CACHE['driver_mtime'] = None
+        DATA_CACHE['driver_records'] = []
+
+
+def read_managed_workbook(kind):
+    path = data_file_path(kind)
+    if not os.path.exists(path):
+        raise RuntimeError('资料文件不存在')
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    headers = [compact_text(ws.cell(row=1, column=i).value) for i in range(1, ws.max_column + 1)]
+    return path, wb, ws, headers
+
+
+def row_values(ws, headers, row_num):
+    return {
+        header: compact_text(ws.cell(row=row_num, column=i + 1).value)
+        for i, header in enumerate(headers)
+        if header
+    }
+
+
+def managed_search(kind, query):
+    query = compact_text(query)
+    if len(query) < 1:
+        return [], []
+
+    path, wb, ws, headers = read_managed_workbook(kind)
+    items = []
+    for row_num in range(2, ws.max_row + 1):
+        values = row_values(ws, headers, row_num)
+        if not any(values.values()):
+            continue
+        first = next(iter(values.values()), '')
+        if '示例' in first or '↓' in first:
+            continue
+
+        if kind == 'vehicle':
+            plate = values.get('车牌号码', '')
+            rank = rank_plate_match(query, plate, normalize_plate_query(plate))
+            sort_key = normalize_plate_query(plate)
+        else:
+            rank = rank_match(query, values.get('姓名', ''))
+            sort_key = normalize_query(values.get('姓名', ''))
+        if rank is None:
+            continue
+        items.append({
+            'id': row_num,
+            'rank': rank,
+            'sort_key': sort_key,
+            'values': values,
+        })
+
+    items.sort(key=lambda item: (item['rank'], item['sort_key'], item['id']))
+    for item in items:
+        item.pop('rank', None)
+        item.pop('sort_key', None)
+    return headers, items[:50]
+
+
+def backup_data_file(path):
+    import shutil
+    backup_dir = os.path.join(app.config['DATA_FOLDER'], 'backups')
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_name = os.path.basename(path) + '.bak.' + uuid.uuid4().hex[:8]
+    shutil.copy2(path, os.path.join(backup_dir, backup_name))
+
+
+def update_managed_row(kind, row_id, values):
+    try:
+        row_num = int(row_id)
+    except Exception:
+        raise RuntimeError('无效记录ID')
+
+    if not isinstance(values, dict):
+        raise RuntimeError('提交数据格式错误')
+
+    path, wb, ws, headers = read_managed_workbook(kind)
+    if row_num < 2 or row_num > ws.max_row:
+        raise RuntimeError('记录不存在')
+
+    header_to_col = {header: i + 1 for i, header in enumerate(headers) if header}
+    allowed_values = {k: compact_text(v) for k, v in values.items() if k in header_to_col}
+    if not allowed_values:
+        raise RuntimeError('没有可更新字段')
+
+    backup_data_file(path)
+    for header, value in allowed_values.items():
+        ws.cell(row=row_num, column=header_to_col[header]).value = value
+    wb.save(path)
+    os.chmod(path, 0o600)
+    invalidate_data_cache(kind)
+    return row_values(ws, headers, row_num)
 
 
 def compact_text(value):
@@ -267,8 +382,68 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def allowed_template_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'doc', 'docx'}
+
+
+def template_display_name(filename):
+    name = os.path.splitext(filename)[0]
+    return name.replace('-电子合同', '').replace('电子合同', '').strip('-_ ')
+
+
+def list_builtin_templates():
+    folder = app.config['TEMPLATE_FOLDER']
+    if not os.path.isdir(folder):
+        return []
+    items = []
+    for filename in sorted(os.listdir(folder)):
+        if not allowed_template_file(filename):
+            continue
+        path = os.path.join(folder, filename)
+        if not os.path.isfile(path):
+            continue
+        items.append({
+            'id': filename,
+            'name': template_display_name(filename),
+            'filename': filename,
+        })
+    return items
+
+
+def get_builtin_template_path(template_id):
+    template_id = compact_text(template_id)
+    if not template_id or '/' in template_id or '\\' in template_id or not allowed_template_file(template_id):
+        raise RuntimeError('无效模板')
+    path = os.path.join(app.config['TEMPLATE_FOLDER'], template_id)
+    if not os.path.isfile(path):
+        raise RuntimeError('模板不存在')
+    return path
+
+
 def is_logged_in():
     return session.get('logged_in') is True
+
+
+def client_key():
+    return request.headers.get('X-Real-IP') or request.remote_addr or 'unknown'
+
+
+def login_locked(key):
+    now = time.time()
+    attempts = [t for t in LOGIN_ATTEMPTS.get(key, []) if now - t < LOGIN_LOCK_SECONDS]
+    LOGIN_ATTEMPTS[key] = attempts
+    return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+
+def record_login_failure(key):
+    now = time.time()
+    attempts = [t for t in LOGIN_ATTEMPTS.get(key, []) if now - t < LOGIN_LOCK_SECONDS]
+    attempts.append(now)
+    LOGIN_ATTEMPTS[key] = attempts
+
+
+def clear_login_failures(key):
+    LOGIN_ATTEMPTS.pop(key, None)
 
 
 @app.before_request
@@ -283,6 +458,17 @@ def require_login():
     return redirect(url_for('login', next=request.full_path if request.query_string else request.path))
 
 
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    if request.path.startswith('/api/lookup') or request.path.startswith('/api/manage'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+    return response
+
+
 def normalize_plate(val):
     """车牌号去掉苏K-前缀"""
     if val and val.upper().startswith('苏K-'):
@@ -295,19 +481,62 @@ def fill_doc_template(template_path, data, output_path):
     from docx import Document
     from collections import defaultdict
 
+    def copy_run_style(src, dst):
+        if not src:
+            return
+        dst.bold = src.bold
+        dst.italic = src.italic
+        dst.font.name = src.font.name
+        dst.font.size = src.font.size
+        dst.font.color.rgb = src.font.color.rgb
+
+    def rebuild_para_with_segments(para, segments):
+        template_run = para.runs[0] if para.runs else None
+        for run in para.runs:
+            run.text = ''
+        first = True
+        for text, underline in segments:
+            if text == '':
+                continue
+            if first and para.runs:
+                run = para.runs[0]
+                first = False
+            else:
+                run = para.add_run()
+                copy_run_style(template_run, run)
+            run.text = text
+            if underline:
+                run.underline = True
+
+    def placeholder_segments(text):
+        pattern = _re.compile(r'\{\{([A-Za-z0-9_]+)\}\}')
+        segments = []
+        pos = 0
+        for match in pattern.finditer(text):
+            if match.start() > pos:
+                segments.append((text[pos:match.start()], False))
+            val = data.get(match.group(1), '')
+            if val:
+                segments.append((str(val), True))
+            pos = match.end()
+        if pos < len(text):
+            segments.append((text[pos:], False))
+        return segments
+
     doc = Document(template_path)
-    all_text = ' '.join(p.text for p in doc.paragraphs)
+    all_parts = [p.text for p in doc.paragraphs]
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                all_parts.extend(p.text for p in cell.paragraphs)
+    all_text = ' '.join(all_parts)
     use_placeholder = '{{' in all_text
 
     if use_placeholder:
         def replace_in_para(para):
             full = ''.join(r.text for r in para.runs)
-            for key, val in data.items():
-                full = full.replace('{{' + key + '}}', str(val) if val else '')
-            if para.runs:
-                para.runs[0].text = full
-                for r in para.runs[1:]:
-                    r.text = ''
+            if '{{' in full:
+                rebuild_para_with_segments(para, placeholder_segments(full))
         for para in doc.paragraphs:
             replace_in_para(para)
         for table in doc.tables:
@@ -319,14 +548,24 @@ def fill_doc_template(template_path, data, output_path):
         def replace_blanks_in_para(para, replacements):
             full = ''.join(r.text for r in para.runs)
             gaps = list(_re.finditer(r' {2,}', full))
-            for gap_i, val in sorted(replacements.items(), reverse=True):
+            marks = []
+            for gap_i, val in replacements.items():
                 if gap_i < len(gaps):
                     m = gaps[gap_i]
-                    full = full[:m.start()] + str(val) + full[m.end():]
-            if para.runs:
-                para.runs[0].text = full
-                for r in para.runs[1:]:
-                    r.text = ''
+                    marks.append((m.start(), m.end(), str(val)))
+            if not marks:
+                return
+            marks.sort()
+            segments = []
+            pos = 0
+            for start, end, val in marks:
+                if start > pos:
+                    segments.append((full[pos:start], False))
+                segments.append((val, True))
+                pos = end
+            if pos < len(full):
+                segments.append((full[pos:], False))
+            rebuild_para_with_segments(para, segments)
 
         para_replacements = defaultdict(dict)
         for para_i, gap_i, key in NANJING_BLANK_MAP:
@@ -611,10 +850,17 @@ def build_fill_data(source_data):
     return data
 
 
-def prepare_template_file(tmpl_file, task_id):
-    tmpl_ext = tmpl_file.filename.rsplit('.', 1)[1].lower() if '.' in tmpl_file.filename else 'docx'
-    tmpl_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_template.' + tmpl_ext)
-    tmpl_file.save(tmpl_path)
+def prepare_template_file(tmpl_file, task_id, template_id=''):
+    if tmpl_file:
+        tmpl_ext = tmpl_file.filename.rsplit('.', 1)[1].lower() if '.' in tmpl_file.filename else 'docx'
+        tmpl_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_template.' + tmpl_ext)
+        tmpl_file.save(tmpl_path)
+    else:
+        source_path = get_builtin_template_path(template_id)
+        tmpl_ext = source_path.rsplit('.', 1)[1].lower()
+        tmpl_path = os.path.join(app.config['UPLOAD_FOLDER'], task_id + '_template.' + tmpl_ext)
+        shutil.copy2(source_path, tmpl_path)
+
 
     if tmpl_ext == 'doc':
         code, out, err = run_cmd(
@@ -679,16 +925,22 @@ def index():
 def login():
     error = ''
     if request.method == 'POST':
+        key = client_key()
+        if login_locked(key):
+            return render_template('login.html', error='登录失败次数过多，请稍后再试', next_url=request.args.get('next', '')), 429
         username = request.form.get('username', '')
         password = request.form.get('password', '')
         if hmac.compare_digest(username, LOGIN_USERNAME) and hmac.compare_digest(password, LOGIN_PASSWORD):
+            clear_login_failures(key)
             session.clear()
+            session.permanent = True
             session['logged_in'] = True
             session['username'] = LOGIN_USERNAME
             next_url = request.form.get('next') or url_for('index')
             if not next_url.startswith('/'):
                 next_url = url_for('index')
             return redirect(next_url)
+        record_login_failure(key)
         error = '账号或密码错误'
     return render_template('login.html', error=error, next_url=request.args.get('next', ''))
 
@@ -702,6 +954,11 @@ def logout():
 @app.route('/api/fields')
 def get_fields():
     return jsonify(FIELD_DEFS)
+
+
+@app.route('/api/templates')
+def get_templates():
+    return jsonify({'items': list_builtin_templates()})
 
 
 @app.route('/api/lookup/vehicle')
@@ -754,6 +1011,50 @@ def lookup_driver():
     return jsonify({'items': items})
 
 
+@app.route('/api/manage/drivers')
+def manage_drivers():
+    query = request.args.get('q', '').strip()
+    try:
+        headers, items = managed_search('driver', query)
+        return jsonify({'headers': headers, 'items': items})
+    except Exception as e:
+        logger.error('manage_drivers failed: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/manage/drivers/<row_id>', methods=['POST'])
+def update_driver(row_id):
+    payload = request.get_json(silent=True) or {}
+    try:
+        values = update_managed_row('driver', row_id, payload.get('values', {}))
+        return jsonify({'success': True, 'values': values})
+    except Exception as e:
+        logger.error('update_driver failed: %s', e)
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/manage/vehicles')
+def manage_vehicles():
+    query = request.args.get('q', '').strip()
+    try:
+        headers, items = managed_search('vehicle', query)
+        return jsonify({'headers': headers, 'items': items})
+    except Exception as e:
+        logger.error('manage_vehicles failed: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/manage/vehicles/<row_id>', methods=['POST'])
+def update_vehicle(row_id):
+    payload = request.get_json(silent=True) or {}
+    try:
+        values = update_managed_row('vehicle', row_id, payload.get('values', {}))
+        return jsonify({'success': True, 'values': values})
+    except Exception as e:
+        logger.error('update_vehicle failed: %s', e)
+        return jsonify({'error': str(e)}), 400
+
+
 @app.route('/api/parse-excel', methods=['POST'])
 def parse_excel():
     if 'excel' not in request.files:
@@ -774,10 +1075,11 @@ def parse_excel():
 @app.route('/api/generate-manual', methods=['POST'])
 def generate_manual():
     """手动输入单条数据，生成一张合同图片并直接返回"""
-    if 'template' not in request.files:
-        return jsonify({'error': '请上传Word模板'}), 400
+    tmpl_file = request.files.get('template')
+    template_id = request.form.get('template_id', '')
+    if not tmpl_file and not template_id:
+        return jsonify({'error': '请选择或上传Word模板'}), 400
 
-    tmpl_file = request.files['template']
     raw_data = request.form.get('data')
     if not raw_data:
         return jsonify({'error': '请提供字段数据'}), 400
@@ -789,7 +1091,7 @@ def generate_manual():
 
     task_id = str(uuid.uuid4())[:8]
     try:
-        tmpl_path = prepare_template_file(tmpl_file, task_id)
+        tmpl_path = prepare_template_file(tmpl_file, task_id, template_id)
         result = generate_contract_images(tmpl_path, [fill_data], task_id)
         return send_file(result['single_image'], mimetype='image/png',
                          as_attachment=True, download_name='合同.png')
@@ -801,8 +1103,10 @@ def generate_manual():
 @app.route('/api/generate-rows', methods=['POST'])
 def generate_rows():
     """前端手动批量行生成，支持只填车牌和司机姓名后自动补全。"""
-    if 'template' not in request.files:
-        return jsonify({'error': '请上传Word模板'}), 400
+    tmpl_file = request.files.get('template')
+    template_id = request.form.get('template_id', '')
+    if not tmpl_file and not template_id:
+        return jsonify({'error': '请选择或上传Word模板'}), 400
 
     raw_rows = request.form.get('rows')
     if not raw_rows:
@@ -829,7 +1133,7 @@ def generate_rows():
 
     task_id = str(uuid.uuid4())[:8]
     try:
-        tmpl_path = prepare_template_file(request.files['template'], task_id)
+        tmpl_path = prepare_template_file(tmpl_file, task_id, template_id)
         result = generate_contract_images(tmpl_path, clean_rows, task_id)
         if result.get('single_image'):
             return send_file(result['single_image'], mimetype='image/png',
@@ -850,10 +1154,13 @@ def generate_rows():
 @app.route('/api/generate', methods=['POST'])
 def generate():
     """批量Excel生成，多份合同打包ZIP（每份一张图片）"""
-    if 'template' not in request.files or 'excel' not in request.files:
-        return jsonify({'error': '请上传模板和Excel'}), 400
+    if 'excel' not in request.files:
+        return jsonify({'error': '请上传Excel'}), 400
 
-    tmpl_file = request.files['template']
+    tmpl_file = request.files.get('template')
+    template_id = request.form.get('template_id', '')
+    if not tmpl_file and not template_id:
+        return jsonify({'error': '请选择或上传Word模板'}), 400
     excel_file = request.files['excel']
     mapping_raw = request.form.get('mapping')
     if not mapping_raw:
@@ -866,7 +1173,7 @@ def generate():
     excel_file.save(excel_path)
 
     try:
-        tmpl_path = prepare_template_file(tmpl_file, task_id)
+        tmpl_path = prepare_template_file(tmpl_file, task_id, template_id)
         headers, records = read_excel(excel_path)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
