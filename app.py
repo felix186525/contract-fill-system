@@ -588,6 +588,19 @@ def fill_doc_template(template_path, data, output_path):
         dst.font.name = src.font.name
         dst.font.size = src.font.size
         dst.font.color.rgb = src.font.color.rgb
+        try:
+            from docx.oxml.ns import qn
+            src_rpr = src._element.rPr
+            src_fonts = src_rpr.rFonts if src_rpr is not None else None
+            if src_fonts is not None:
+                dst_rpr = dst._element.get_or_add_rPr()
+                dst_fonts = dst_rpr.get_or_add_rFonts()
+                for attr in ('ascii', 'hAnsi', 'eastAsia', 'cs'):
+                    value = src_fonts.get(qn('w:' + attr))
+                    if value:
+                        dst_fonts.set(qn('w:' + attr), value)
+        except Exception:
+            pass
 
     def rebuild_para_with_segments(para, segments):
         template_run = para.runs[0] if para.runs else None
@@ -757,17 +770,21 @@ def _print_page_with_round_stamps(source):
     box_w = box_right - box_left
     box_h = box_bottom - box_top
 
-    canvas = Image.new('RGB', PRINT_PAGE_SIZE, (255, 255, 255))
-    canvas.paste(source.resize((box_w, box_h), Image.LANCZOS), (box_left, box_top))
-
     src_w, src_h = source.size
-    scale_x = box_w / src_w
-    scale_y = box_h / src_h
+    scale = min(box_w / src_w, box_h / src_h)
+    scaled_w = max(1, round(src_w * scale))
+    scaled_h = max(1, round(src_h * scale))
+    paste_left = box_left + (box_w - scaled_w) // 2
+    paste_top = box_top
+
+    canvas = Image.new('RGB', PRINT_PAGE_SIZE, (255, 255, 255))
+    canvas.paste(source.resize((scaled_w, scaled_h), Image.LANCZOS), (paste_left, paste_top))
+
     canvas_pix = canvas.load()
-    erase_top = max(0, box_top + int(src_h * 0.75 * scale_y) - 80)
-    erase_bottom = min(page_h, box_bottom + 120)
+    erase_top = max(0, paste_top + int(src_h * 0.75 * scale) - 80)
+    erase_bottom = min(page_h, paste_top + scaled_h + 120)
     for y in range(erase_top, erase_bottom):
-        for x in range(box_left, box_right):
+        for x in range(paste_left, min(page_w, paste_left + scaled_w)):
             if _is_stamp_red(*canvas_pix[x, y]):
                 canvas_pix[x, y] = (255, 255, 255)
 
@@ -786,15 +803,75 @@ def _print_page_with_round_stamps(source):
                 data.append((255, 255, 255, 0))
         crop.putdata(data)
 
-        # 使用横向缩放比例回贴红章层，避免整页纵向压缩把圆章压成椭圆。
-        stamp_w = max(1, round(crop.width * scale_x))
-        stamp_h = max(1, round(crop.height * scale_x))
+        # 使用统一缩放比例回贴红章层，避免圆章和文字发生横纵变形。
+        stamp_w = max(1, round(crop.width * scale))
+        stamp_h = max(1, round(crop.height * scale))
         crop = crop.resize((stamp_w, stamp_h), Image.LANCZOS)
-        paste_x = box_left + round(x1 * scale_x)
-        paste_y = box_top + round(y1 * scale_y) - round((stamp_h - (y2 - y1) * scale_y) / 2)
+        paste_x = paste_left + round(x1 * scale)
+        paste_y = paste_top + round(y1 * scale)
         canvas.paste(crop, (paste_x, paste_y), crop)
 
     return canvas
+
+
+def _compact_vertical_whitespace(img, target_ratio):
+    """压缩行间空白，不拉伸文字/印章，用于把跨页合同自然压回单页密度。"""
+    from PIL import Image
+
+    target_h = int(img.width * target_ratio)
+    if img.height <= target_h:
+        return img
+
+    pix = img.load()
+    ink_limit = max(3, img.width // 250)
+    blank_rows = []
+    for y in range(img.height):
+        ink = 0
+        for x in range(img.width):
+            if pix[x, y] != (255, 255, 255):
+                ink += 1
+                if ink > ink_limit:
+                    break
+        if ink <= ink_limit:
+            blank_rows.append(y)
+
+    need_remove = min(img.height - target_h, max(0, len(blank_rows) - 80))
+    if need_remove <= 0:
+        return img
+
+    runs = []
+    start = prev = blank_rows[0]
+    for y in blank_rows[1:]:
+        if y == prev + 1:
+            prev = y
+            continue
+        runs.append((start, prev))
+        start = prev = y
+    runs.append((start, prev))
+
+    candidates = []
+    for start, end in runs:
+        length = end - start + 1
+        keep = 4 if length < 30 else 8
+        if length > keep * 2:
+            candidates.extend(range(start + keep, end - keep + 1))
+        elif length > keep:
+            candidates.extend(range(start + keep, end + 1))
+
+    if len(candidates) <= need_remove:
+        remove_rows = set(candidates)
+    else:
+        step = len(candidates) / need_remove
+        remove_rows = {candidates[int(i * step)] for i in range(need_remove)}
+
+    compact = Image.new('RGB', (img.width, img.height - len(remove_rows)), (255, 255, 255))
+    dst_y = 0
+    for y in range(img.height):
+        if y in remove_rows:
+            continue
+        compact.paste(img.crop((0, y, img.width, y + 1)), (0, dst_y))
+        dst_y += 1
+    return compact
 
 
 def docx_to_single_image(docx_path, output_dir, out_name='contract'):
@@ -876,30 +953,34 @@ def docx_to_single_image(docx_path, output_dir, out_name='contract'):
     from PIL import Image, ImageChops
 
     MARGIN = 30  # 约5mm @150dpi
+    TOP_KEEP = 90  # 保留少量页眉空白，避免合同标题顶到上边
 
     def get_content_bounds(img):
         diff = ImageChops.difference(img, Image.new('RGB', img.size, (255, 255, 255)))
         bb = diff.getbbox()
         return bb
 
+    def crop_content(img, bb, is_first=False):
+        left = max(0, bb[0] - MARGIN)
+        right = min(img.width, bb[2] + MARGIN)
+        top_margin = TOP_KEEP if is_first else MARGIN
+        top = max(0, bb[1] - top_margin)
+        bottom = min(img.height, bb[3] + MARGIN)
+        return img.crop((left, top, right, bottom))
+
     imgs = [Image.open(p).convert('RGB') for p in pages]
 
     if len(imgs) == 1:
         bb = get_content_bounds(imgs[0])
-        bottom = min(imgs[0].height, bb[3] + MARGIN) if bb else imgs[0].height
-        final = imgs[0].crop((0, 0, imgs[0].width, bottom))
+        final = crop_content(imgs[0], bb, is_first=True) if bb else imgs[0]
     else:
-        # 第1页：从0到内容底部+边距（裁底部空白）
-        # 中间页/最后页：裁顶部分页空白（去掉page break空白），底部+边距
+        # 裁掉PDF页四周空白后再合成长图，避免最终打印页二次白边导致内容过小。
         crops = []
         for idx, img in enumerate(imgs):
             bb = get_content_bounds(img)
             if not bb:
                 continue
-            is_first = (idx == 0)
-            top = 0 if is_first else max(0, bb[1] - MARGIN)
-            bottom = min(img.height, bb[3] + MARGIN)
-            crops.append(img.crop((0, top, img.width, bottom)))
+            crops.append(crop_content(img, bb, is_first=(idx == 0)))
 
         if not crops:
             raise RuntimeError('转换后的图片为空')
@@ -913,8 +994,9 @@ def docx_to_single_image(docx_path, output_dir, out_name='contract'):
             y += c.height
         final = merged
 
-    if final.height / final.width > 1.6:
-        final = _print_page_with_round_stamps(final)
+    final = _compact_vertical_whitespace(final, (PRINT_CONTENT_BOX[3] - PRINT_CONTENT_BOX[1]) / (PRINT_CONTENT_BOX[2] - PRINT_CONTENT_BOX[0]))
+
+    final = _print_page_with_round_stamps(final)
 
     final_path = os.path.join(output_dir, out_name + '.png')
     final.save(final_path)
